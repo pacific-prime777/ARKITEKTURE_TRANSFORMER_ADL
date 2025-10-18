@@ -232,6 +232,10 @@ class CycleTrainingMixin:
         if hasattr(loss_fn, 'set_exploration_phase'):
             loss_fn.set_exploration_phase(phase_info['is_exploration'])
 
+        # Update lambda_mean in loss function
+        if hasattr(loss_fn, 'lambda_mean'):
+            loss_fn.lambda_mean = phase_info['lambda_mean']
+
         # Update model excitation amplitude
         if hasattr(model, 'inl') and hasattr(model.inl, 'excitation_amplitude'):
             model.inl.excitation_amplitude = phase_info['excitation_amplitude']
