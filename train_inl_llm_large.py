@@ -29,6 +29,7 @@ MODEL_CONFIGS = {
     'small': {
         'd_model': 512,
         'num_layers': 6,
+        'num_heads': 8,
         'num_iterations_per_layer': 5,
         'feedforward_dim': 2048,
         'max_seq_len': 512,
@@ -37,6 +38,7 @@ MODEL_CONFIGS = {
     'medium': {
         'd_model': 768,
         'num_layers': 12,
+        'num_heads': 12,
         'num_iterations_per_layer': 7,
         'feedforward_dim': 3072,
         'max_seq_len': 1024,
@@ -45,6 +47,7 @@ MODEL_CONFIGS = {
     'large': {
         'd_model': 1024,
         'num_layers': 24,
+        'num_heads': 16,
         'num_iterations_per_layer': 10,
         'feedforward_dim': 4096,
         'max_seq_len': 2048,
@@ -53,6 +56,7 @@ MODEL_CONFIGS = {
     'xlarge': {
         'd_model': 1536,
         'num_layers': 32,
+        'num_heads': 24,
         'num_iterations_per_layer': 12,
         'feedforward_dim': 6144,
         'max_seq_len': 4096,
@@ -61,6 +65,7 @@ MODEL_CONFIGS = {
     '3b': {
         'd_model': 2048,
         'num_layers': 40,
+        'num_heads': 32,
         'num_iterations_per_layer': 15,
         'feedforward_dim': 8192,
         'max_seq_len': 4096,
@@ -69,6 +74,7 @@ MODEL_CONFIGS = {
     '4b': {
         'd_model': 2304,
         'num_layers': 48,
+        'num_heads': 36,
         'num_iterations_per_layer': 15,
         'feedforward_dim': 9216,
         'max_seq_len': 4096,
@@ -182,11 +188,13 @@ def create_inl_llm(model_size='small', vocab_size=50257):
     config = MODEL_CONFIGS[model_size]
 
     print(f"\n{'='*60}")
-    print(f"Création IntegratorLanguageModel ({model_size.upper()})")
+    print(f"Création IntegratorLanguageModel HYBRIDE ({model_size.upper()})")
     print(f"{'='*60}")
+    print(f"  Architecture: Attention + INL")
     print(f"  Paramètres estimés: {config['params_approx']}")
     print(f"  d_model: {config['d_model']}")
     print(f"  Layers: {config['num_layers']}")
+    print(f"  Attention heads: {config['num_heads']}")
     print(f"  INL iterations/layer: {config['num_iterations_per_layer']}")
     print(f"  Max sequence length: {config['max_seq_len']}")
 
@@ -194,11 +202,13 @@ def create_inl_llm(model_size='small', vocab_size=50257):
         vocab_size=vocab_size,
         d_model=config['d_model'],
         num_layers=config['num_layers'],
+        num_heads=config['num_heads'],
         num_iterations_per_layer=config['num_iterations_per_layer'],
         feedforward_dim=config['feedforward_dim'],
         max_seq_len=config['max_seq_len'],
         dropout=0.1,
-        tie_weights=True
+        tie_weights=True,
+        use_attention=True
     )
 
     actual_params = model.get_num_params()

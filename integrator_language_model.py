@@ -46,37 +46,44 @@ class PositionalEncoding(nn.Module):
 
 class IntegratorLanguageBlock(nn.Module):
     """
-    Bloc de langage basé sur INL.
+    Bloc de langage hybride: Attention + INL.
 
-    Au lieu de l'attention multi-tête, on utilise la dynamique intégrateur
-    pour faire évoluer les représentations de tokens.
+    Architecture améliorée qui combine:
+    1. Multi-head attention pour capturer les dépendances contextuelles
+    2. Dynamique intégrateur INL pour raffiner les représentations
 
     Intuition :
+    - L'attention extrait le contexte sélectif (comme Transformer)
+    - INL applique une dynamique d'équilibre pour stabiliser/raffiner
     - Chaque token a un état x_t et une vitesse v_t
     - Les contrôleurs α, β, g adaptent la dynamique selon le contexte
-    - L'état évolue en intégrant les informations des tokens voisins
     """
 
     def __init__(
         self,
         d_model: int,
+        num_heads: int = 8,
         num_iterations: int = 5,
         target_value: float = 0.0,
         feedforward_dim: int = None,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        use_attention: bool = True
     ):
         """
         Args:
             d_model: Dimension du modèle
+            num_heads: Nombre de têtes d'attention
             num_iterations: Nombre d'itérations de la dynamique INL
             target_value: Valeur cible initiale
             feedforward_dim: Dimension du feedforward (défaut: 4*d_model)
             dropout: Dropout rate
+            use_attention: Si True, utilise attention + INL. Si False, seulement INL (ancien comportement)
         """
         super().__init__()
 
         self.d_model = d_model
         self.num_iterations = num_iterations
+        self.use_attention = use_attention
 
         if feedforward_dim is None:
             feedforward_dim = 4 * d_model
@@ -84,10 +91,19 @@ class IntegratorLanguageBlock(nn.Module):
         # Layer Norm
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
+        self.norm_attn = nn.LayerNorm(d_model) if use_attention else None
 
-        # Projection de contexte (comme attention mais plus simple)
-        # Au lieu de Q,K,V, on fait une projection directe
-        self.context_projection = nn.Linear(d_model, d_model)
+        # === AJOUT: Multi-Head Attention ===
+        if use_attention:
+            self.attention = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True  # Input shape: [batch, seq, dim]
+            )
+        else:
+            # Fallback: projection simple (ancien comportement)
+            self.context_projection = nn.Linear(d_model, d_model)
 
         # INL pour chaque position
         self.inl = IntegratorNeuronLayer(
@@ -116,7 +132,7 @@ class IntegratorLanguageBlock(nn.Module):
         """
         Args:
             x: [batch_size, seq_len, d_model]
-            mask: Optional attention mask
+            mask: Optional attention mask (causal mask pour autoregressive)
 
         Returns:
             output: [batch_size, seq_len, d_model]
@@ -124,35 +140,46 @@ class IntegratorLanguageBlock(nn.Module):
         """
         batch_size, seq_len, d_model = x.shape
 
+        # === ÉTAPE 1: Multi-Head Attention (nouveau) ===
+        if self.use_attention:
+            # Normalisation pré-attention
+            x_norm = self.norm_attn(x)
+
+            # Créer le masque causal pour l'attention autoregressive
+            # PyTorch MultiheadAttention attend un masque additive (True = masqué)
+            if mask is None:
+                # Masque causal: chaque position peut seulement voir les positions précédentes
+                attn_mask = torch.triu(
+                    torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool),
+                    diagonal=1
+                )
+            else:
+                attn_mask = mask
+
+            # Attention multi-tête
+            attn_output, attn_weights = self.attention(
+                x_norm, x_norm, x_norm,
+                attn_mask=attn_mask,
+                need_weights=False
+            )
+
+            # Connexion résiduelle + dropout
+            x = x + self.dropout(attn_output)
+
+            # Le contexte pour INL vient de l'attention
+            context = attn_output
+        else:
+            # Ancien comportement: projection simple
+            x_norm = self.norm1(x)
+            context = self.context_projection(x_norm)
+
+        # === ÉTAPE 2: Dynamique INL (raffinement) ===
         # Normalisation
         x_norm = self.norm1(x)
 
-        # Contexte (agrégation simple des tokens)
-        context = self.context_projection(x_norm)
-
-        # ========== VERSION PARALLÉLISÉE ==========
-        # Au lieu de boucler sur seq_len, traiter tous les tokens en parallèle
-
         # Initialiser états et vitesses pour tous les tokens
-        # x_state: [batch_size, seq_len, d_model]
-        # v_state: [batch_size, seq_len, d_model]
-        x_state = x_norm.clone()  # Initialiser avec les états actuels
-        v_state = torch.zeros_like(x_norm)  # Vitesse initiale = 0
-
-        # Calculer le contexte pour chaque position
-        if mask is not None:
-            # Masque causal : pour chaque position i, moyenne sur [:i+1]
-            # Créer une matrice triangulaire inférieure pour le masquage causal
-            causal_mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device))
-            causal_mask = causal_mask / causal_mask.sum(dim=1, keepdim=True)  # Normaliser
-            # ctx: [batch_size, seq_len, d_model]
-            ctx = torch.bmm(
-                causal_mask.unsqueeze(0).expand(batch_size, -1, -1),
-                context
-            )
-        else:
-            # Contexte complet : moyenne sur toute la séquence
-            ctx = context.mean(dim=1, keepdim=True).expand(-1, seq_len, -1)
+        x_state = x_norm.clone()
+        v_state = torch.zeros_like(x_norm)
 
         # Faire évoluer via dynamique INL (itérations parallèles)
         for iteration in range(self.num_iterations):
@@ -160,7 +187,7 @@ class IntegratorLanguageBlock(nn.Module):
             # INL attend [batch_size * seq_len, d_model]
             x_flat = x_state.reshape(batch_size * seq_len, d_model)
             v_flat = v_state.reshape(batch_size * seq_len, d_model)
-            ctx_flat = ctx.reshape(batch_size * seq_len, d_model)
+            ctx_flat = context.reshape(batch_size * seq_len, d_model)
 
             # Forward INL en parallèle pour tous les tokens
             x_next_flat, v_next_flat, aux = self.inl(ctx_flat, x_flat, v_flat)
@@ -175,7 +202,7 @@ class IntegratorLanguageBlock(nn.Module):
         # Connexion résiduelle + dropout
         x = x + self.dropout(output)
 
-        # Feedforward
+        # === ÉTAPE 3: Feedforward ===
         x = x + self.ff(self.norm2(x))
 
         return x, aux_infos
@@ -183,15 +210,15 @@ class IntegratorLanguageBlock(nn.Module):
 
 class IntegratorLanguageModel(nn.Module):
     """
-    Modèle de langage complet basé sur IntegratorNeuronLayer.
+    Modèle de langage hybride: Attention + INL.
 
-    Architecture :
+    Architecture améliorée :
         Token Embedding → Positional Encoding →
-        N × IntegratorLanguageBlock → LM Head
+        N × (Attention + INL + Feedforward) → LM Head
 
-    Différence avec Transformer :
-    - Pas d'attention multi-tête
-    - Dynamique intégrateur/vitesse pour chaque token
+    Innovations :
+    - Multi-head attention pour capturer les dépendances contextuelles
+    - Dynamique intégrateur INL pour raffiner les représentations
     - Convergence contrôlée via α, β, g
     """
 
@@ -200,28 +227,33 @@ class IntegratorLanguageModel(nn.Module):
         vocab_size: int,
         d_model: int = 512,
         num_layers: int = 6,
+        num_heads: int = 8,
         num_iterations_per_layer: int = 5,
         feedforward_dim: int = None,
         max_seq_len: int = 2048,
         dropout: float = 0.1,
-        tie_weights: bool = True
+        tie_weights: bool = True,
+        use_attention: bool = True
     ):
         """
         Args:
             vocab_size: Taille du vocabulaire
             d_model: Dimension du modèle
             num_layers: Nombre de couches IntegratorLanguageBlock
+            num_heads: Nombre de têtes d'attention (défaut: 8)
             num_iterations_per_layer: Itérations INL par couche
             feedforward_dim: Dimension feedforward
             max_seq_len: Longueur maximale de séquence
             dropout: Dropout rate
             tie_weights: Partager poids embedding et LM head
+            use_attention: Si True, architecture hybride Attention+INL. Si False, seulement INL
         """
         super().__init__()
 
         self.vocab_size = vocab_size
         self.d_model = d_model
         self.num_layers = num_layers
+        self.use_attention = use_attention
 
         # Token embedding
         self.token_embedding = nn.Embedding(vocab_size, d_model)
@@ -232,14 +264,16 @@ class IntegratorLanguageModel(nn.Module):
         # Dropout initial
         self.dropout = nn.Dropout(dropout)
 
-        # Stack de couches IntegratorLanguageBlock
+        # Stack de couches IntegratorLanguageBlock (hybrides)
         self.layers = nn.ModuleList([
             IntegratorLanguageBlock(
                 d_model=d_model,
+                num_heads=num_heads,
                 num_iterations=num_iterations_per_layer,
                 target_value=0.0,
                 feedforward_dim=feedforward_dim,
-                dropout=dropout
+                dropout=dropout,
+                use_attention=use_attention
             )
             for _ in range(num_layers)
         ])
