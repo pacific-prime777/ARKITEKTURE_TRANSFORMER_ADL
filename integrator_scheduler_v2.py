@@ -10,6 +10,7 @@ This deterministic cycling encourages structured exploration without randomness.
 
 from typing import Dict, NamedTuple
 import torch
+from copy import deepcopy
 
 
 class PhaseConfig(NamedTuple):
@@ -319,16 +320,40 @@ def create_cycle_scheduler(preset: str = 'balanced', **overrides) -> Equilibrium
 
     Args:
         preset: One of 'conservative', 'balanced', 'aggressive'
-        **overrides: Override any preset parameters
+        **overrides: Override any preset parameters. For nested configs like
+                    equilibrium_config or exploration_config, partial overrides
+                    are merged with preset defaults.
 
     Returns:
         Configured EquilibriumExplorationScheduler
+
+    Examples:
+        # Override just lambda_mean in equilibrium phase
+        scheduler = create_cycle_scheduler('balanced',
+            equilibrium_config={'lambda_mean': 0.9})
+
+        # Override multiple top-level parameters
+        scheduler = create_cycle_scheduler('aggressive',
+            num_cycles=10,
+            warmup_epochs=15)
     """
     if preset not in CYCLE_PRESETS:
         raise ValueError(f"Unknown preset '{preset}'. Choose from: {list(CYCLE_PRESETS.keys())}")
 
-    config = CYCLE_PRESETS[preset].copy()
-    config.update(overrides)
+    # Deep copy to avoid mutating the preset
+    config = deepcopy(CYCLE_PRESETS[preset])
+
+    # Merge nested configs intelligently
+    for key, value in overrides.items():
+        if key in ('equilibrium_config', 'exploration_config') and isinstance(value, dict):
+            # Merge nested config instead of replacing it entirely
+            if key in config:
+                config[key].update(value)
+            else:
+                config[key] = value
+        else:
+            # Simple override for non-nested parameters
+            config[key] = value
 
     return EquilibriumExplorationScheduler(**config)
 
