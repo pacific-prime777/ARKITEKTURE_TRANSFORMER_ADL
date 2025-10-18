@@ -166,15 +166,6 @@ class IntegratorNeuronLayer(nn.Module):
             v_next: Next velocity [batch_size, output_dim]
             aux: Dictionary with controller parameters for monitoring
         """
-        # Update learnable equilibrium attractor
-        if self.learnable_mu and self.training:
-            with torch.no_grad():
-                # Adapt mu toward batch mean (slow EMA)
-                batch_mean = h.mean(dim=0, keepdim=True).squeeze(0)[:self.output_dim]
-                if batch_mean.shape[0] == self.output_dim:
-                    self.mu.data = (1 - self.mu_adaptation_rate) * self.mu.data + \
-                                   self.mu_adaptation_rate * batch_mean
-
         # Concatenate inputs for controller
         controller_input = torch.cat([h, x, v], dim=-1)
 
