@@ -80,8 +80,9 @@ class EquilibriumExplorationScheduler:
         self.current_phase = None
 
     def _build_schedule(self):
-        """Build the complete phase schedule."""
+        """Build the complete phase schedule and epoch-to-phase mapping."""
         schedule = []
+        epoch_to_phase = {}
 
         # Warmup: equilibrium phase
         if self.warmup_epochs > 0:
@@ -91,28 +92,42 @@ class EquilibriumExplorationScheduler:
                 'start_epoch': 0,
                 'end_epoch': self.warmup_epochs
             })
+            # Map warmup epochs
+            for e in range(0, self.warmup_epochs):
+                epoch_to_phase[e] = self.equilibrium_phase
 
         # Cycles
         epoch = self.warmup_epochs
         for cycle in range(self.num_cycles):
             # Equilibrium phase
+            start = epoch
+            end = epoch + self.equilibrium_phase.duration_epochs
             schedule.append({
                 'name': f'cycle_{cycle}_equilibrium',
                 'phase': self.equilibrium_phase,
-                'start_epoch': epoch,
-                'end_epoch': epoch + self.equilibrium_phase.duration_epochs
+                'start_epoch': start,
+                'end_epoch': end
             })
-            epoch += self.equilibrium_phase.duration_epochs
+            # Map equilibrium epochs
+            for e in range(start, end):
+                epoch_to_phase[e] = self.equilibrium_phase
+            epoch = end
 
             # Exploration phase
+            start = epoch
+            end = epoch + self.exploration_phase.duration_epochs
             schedule.append({
                 'name': f'cycle_{cycle}_exploration',
                 'phase': self.exploration_phase,
-                'start_epoch': epoch,
-                'end_epoch': epoch + self.exploration_phase.duration_epochs
+                'start_epoch': start,
+                'end_epoch': end
             })
-            epoch += self.exploration_phase.duration_epochs
+            # Map exploration epochs
+            for e in range(start, end):
+                epoch_to_phase[e] = self.exploration_phase
+            epoch = end
 
+        self.epoch_to_phase = epoch_to_phase
         return schedule
 
     def get_phase_config(self, epoch: int) -> PhaseConfig:
@@ -125,9 +140,9 @@ class EquilibriumExplorationScheduler:
         Returns:
             PhaseConfig for the current epoch
         """
-        for entry in self.schedule:
-            if entry['start_epoch'] <= epoch < entry['end_epoch']:
-                return entry['phase']
+        # O(1) lookup using pre-computed mapping
+        if epoch in self.epoch_to_phase:
+            return self.epoch_to_phase[epoch]
 
         # Default to exploration phase after all cycles
         return self.exploration_phase
