@@ -28,10 +28,13 @@ class IntegratorNeuronLayer(nn.Module):
     Implements learnable integrator dynamics with velocity control.
 
     Equations:
-        v_{t+1} = alpha * v_t + (1 - alpha) * v_cand - beta * (x_t - target)
-        x_{t+1} = x_t + dt * g * scale(v_{t+1})
+        error = x_t - mu
+        alpha = alpha_base * exp(-kappa * ||error||)  [if dynamic_alpha=True]
+        v_{t+1} = alpha * v_t + (1 - alpha) * v_cand - beta * error + harmonic_noise
+        x_{t+1} = x_t + (dt * velocity_scale) * g * v_{t+1}
 
-    where alpha, beta, g are context-dependent learnable parameters.
+    where alpha_base, beta, g, v_cand are context-dependent learnable parameters
+    computed by a fused MLP controller from inputs [h, x, v].
     """
 
     def __init__(
@@ -226,7 +229,7 @@ class IntegratorNeuronLayer(nn.Module):
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
         # Add deterministic harmonic excitation (only if amplitude > 0)
-        if self.excitation_amplitude > 0:
+        if self.excitation_amplitude.item() > 0:
             # Deterministic noise based on iteration step
             t = float(step)
             # harmonic_noise shape: [output_dim]
@@ -268,9 +271,47 @@ class IntegratorNeuronLayer(nn.Module):
             v0: Initial velocity [batch_size, output_dim] initialized to 0
         """
         # Initialize to current learned equilibrium, ensure correct device
-        x0 = self.mu.unsqueeze(0).expand(batch_size, -1).to(device)
+        # Move to device before expand for efficiency
+        mu_on_device = self.mu.to(device)
+        x0 = mu_on_device.unsqueeze(0).expand(batch_size, -1)
         v0 = torch.zeros((batch_size, self.output_dim), device=device)
         return x0, v0
+
+    def reset_parameters(self) -> None:
+        """
+        Reset all learnable parameters to their initial values.
+        Standard PyTorch method for parameter reinitialization.
+        """
+        # Reset controller layers
+        nn.init.xavier_uniform_(self.controller_h.weight)
+        nn.init.xavier_uniform_(self.controller_x.weight)
+        nn.init.xavier_uniform_(self.controller_v.weight)
+        self.controller_h.bias.zero_()
+        self.controller_x.bias.zero_()
+        self.controller_v.bias.zero_()
+
+        # Reset output layer with proper initialization
+        output_dim = self._controller_output_dim
+        bias = self.controller_mlp[-1].bias
+
+        # Use stored init values if available, otherwise use defaults
+        init_alpha = getattr(self, '_init_alpha', 0.8)
+        init_beta = getattr(self, '_init_beta', 0.5)
+        init_gate = getattr(self, '_init_gate', 0.5)
+
+        bias[0*output_dim:1*output_dim].fill_(self._inverse_sigmoid(init_alpha))
+        bias[1*output_dim:2*output_dim].fill_(self._inverse_softplus(init_beta))
+        bias[2*output_dim:3*output_dim].fill_(self._inverse_sigmoid(init_gate))
+        bias[3*output_dim:4*output_dim].zero_()
+
+        self.controller_mlp[-1].weight.normal_(0.0, 0.01)
+
+        # Reset excitation parameters
+        with torch.no_grad():
+            gen = torch.Generator()
+            gen.manual_seed(42)
+            self.excitation_gamma.copy_(torch.randn(output_dim, generator=gen) * 0.1 + 1.0)
+            self.excitation_phi.copy_(torch.randn(output_dim, generator=gen) * 2 * math.pi)
 
     def __repr__(self) -> str:
         """String representation for debugging."""
