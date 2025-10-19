@@ -181,10 +181,10 @@ def main():
 
     # ✅ FIX #1: Create IntegratorLoss (was not being used at all)
     integrator_loss_fn = IntegratorLoss(
-        target_value=5.0,
-        lambda_mean_init=1.0,
-        lambda_speed=0.1,
-        lambda_energy=0.01,
+        target_value=0.0,  # ✅ Use 0.0 for normalized hidden states (not 5.0!)
+        lambda_mean_init=0.1,  # ✅ Reduced weight (was 1.0, too high)
+        lambda_speed=0.01,  # ✅ Reduced (was 0.1)
+        lambda_energy=0.001,  # ✅ Reduced (was 0.01)
         annealing_epochs=num_epochs,
         variance_weighted=True,
         task_loss_type='ce'  # ✅ Use CrossEntropy for language modeling (not MSE)
