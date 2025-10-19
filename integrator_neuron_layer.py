@@ -195,10 +195,12 @@ class IntegratorNeuronLayer(nn.Module):
         if self.excitation_amplitude > 0:
             # Deterministic noise based on iteration step
             t = float(step)
+            # harmonic_noise shape: [output_dim]
             harmonic_noise = self.excitation_amplitude * torch.sin(
                 self.excitation_gamma * t + self.excitation_phi
             )
-            v_next = v_next + harmonic_noise.unsqueeze(0)
+            # Broadcast to [batch_size, output_dim]
+            v_next = v_next + harmonic_noise.unsqueeze(0).expand(v_next.shape[0], -1)
 
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
@@ -301,20 +303,21 @@ class IntegratorModel(nn.Module):
                 nn.init.xavier_uniform_(self.readout.weight)
             self.readout.bias.fill_(0.0)  # No bias - x already at target_value
 
-    def forward(
+    def _run_dynamics(
         self,
         inputs: torch.Tensor,
         return_trajectory: bool = False
-    ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """
-        Forward pass through complete model.
+        Internal method to run INL dynamics.
 
         Args:
             inputs: Input features [batch_size, input_dim]
             return_trajectory: If True, return full trajectory and aux info
 
         Returns:
-            output: Final prediction [batch_size, output_dim]
+            x: Final state [batch_size, output_dim]
+            v: Final velocity [batch_size, output_dim]
             trajectory: Optional dict with trajectory info if return_trajectory=True
         """
         batch_size = inputs.shape[0]
@@ -337,12 +340,10 @@ class IntegratorModel(nn.Module):
             x, v, aux = self.inl(h, x, v, step=t)
 
             if return_trajectory:
-                x_traj.append(x)
-                v_traj.append(v)
-                aux_traj.append(aux)
-
-        # Final readout
-        output = self.readout(x)
+                # Detach to avoid keeping full computation graph in memory
+                x_traj.append(x.detach())
+                v_traj.append(v.detach())
+                aux_traj.append({k: v.detach() for k, v in aux.items()})
 
         if return_trajectory:
             trajectory = {
@@ -350,21 +351,37 @@ class IntegratorModel(nn.Module):
                 'v': torch.stack(v_traj, dim=1),  # [B, T+1, output_dim]
                 'aux': aux_traj
             }
+            return x, v, trajectory
+
+        return x, v, None
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        return_trajectory: bool = False
+    ) -> Tuple[torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+        """
+        Forward pass through complete model.
+
+        Args:
+            inputs: Input features [batch_size, input_dim]
+            return_trajectory: If True, return full trajectory and aux info
+
+        Returns:
+            output: Final prediction [batch_size, output_dim]
+            trajectory: Optional dict with trajectory info if return_trajectory=True
+        """
+        x, v, trajectory = self._run_dynamics(inputs, return_trajectory)
+        output = self.readout(x)
+
+        if return_trajectory:
             return output, trajectory
 
         return output, None
 
     def get_final_state(self, inputs: torch.Tensor) -> torch.Tensor:
         """Get final state x_T before readout."""
-        batch_size = inputs.shape[0]
-        device = inputs.device
-
-        h = self.backbone(inputs)
-        x, v = self.inl.init_state(batch_size, device)
-
-        for t in range(self.num_iterations):
-            x, v, _ = self.inl(h, x, v, step=t)
-
+        x, _, _ = self._run_dynamics(inputs, return_trajectory=False)
         return x
 
     def get_learned_mu(self) -> Optional[torch.Tensor]:
@@ -377,3 +394,41 @@ class IntegratorModel(nn.Module):
         if hasattr(self.inl, 'learnable_mu') and self.inl.learnable_mu:
             return self.inl.mu
         return None
+
+    def save_safetensors(self, path: str) -> None:
+        """
+        Save model state dict using safetensors format.
+
+        Args:
+            path: Path to save file (e.g., 'model.safetensors')
+
+        Requires: pip install safetensors
+        """
+        try:
+            from safetensors.torch import save_file
+        except ImportError:
+            raise ImportError(
+                "safetensors not installed. Install with: pip install safetensors"
+            )
+
+        save_file(self.state_dict(), path)
+
+    def load_safetensors(self, path: str, strict: bool = True) -> None:
+        """
+        Load model state dict from safetensors format.
+
+        Args:
+            path: Path to safetensors file
+            strict: Whether to strictly enforce matching keys
+
+        Requires: pip install safetensors
+        """
+        try:
+            from safetensors.torch import load_file
+        except ImportError:
+            raise ImportError(
+                "safetensors not installed. Install with: pip install safetensors"
+            )
+
+        state_dict = load_file(path)
+        self.load_state_dict(state_dict, strict=strict)
