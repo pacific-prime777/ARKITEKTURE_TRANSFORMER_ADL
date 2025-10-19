@@ -115,13 +115,13 @@ class IntegratorNeuronLayer(nn.Module):
         self.excitation_gamma = nn.Parameter(torch.randn(output_dim, generator=gen) * 0.1 + 1.0)
         self.excitation_phi = nn.Parameter(torch.randn(output_dim, generator=gen) * 2 * math.pi)
 
-        # Input dimension for controller: [h, x, v]
-        controller_input_dim = hidden_dim + 2 * output_dim
-
         # Fused controller MLP - outputs all 4 parameters at once for GPU efficiency
-        # Output: [alpha, beta, gate, v_cand] concatenated
+        # Uses 3 separate inputs to avoid concat overhead
+        # Input: h (hidden_dim), x (output_dim), v (output_dim)
+        self.controller_h = nn.Linear(hidden_dim, hidden_controller)
+        self.controller_x = nn.Linear(output_dim, hidden_controller)
+        self.controller_v = nn.Linear(output_dim, hidden_controller)
         self.controller_mlp = nn.Sequential(
-            nn.Linear(controller_input_dim, hidden_controller),
             nn.ReLU(),
             nn.Linear(hidden_controller, 4 * output_dim),  # 4x output for all params
         )
@@ -132,9 +132,16 @@ class IntegratorNeuronLayer(nn.Module):
         # Store dynamic_alpha as buffer for efficient torch.where
         self.register_buffer('_dynamic_alpha_tensor', torch.tensor(dynamic_alpha))
 
-        # Initialize to produce desired initial values
+        # Initialize controller input layers
         with torch.no_grad():
-            # Split the bias into 4 parts
+            nn.init.xavier_uniform_(self.controller_h.weight)
+            nn.init.xavier_uniform_(self.controller_x.weight)
+            nn.init.xavier_uniform_(self.controller_v.weight)
+            self.controller_h.bias.zero_()
+            self.controller_x.bias.zero_()
+            self.controller_v.bias.zero_()
+
+            # Initialize output layer to produce desired initial values
             bias = self.controller_mlp[-1].bias
             alpha_bias = bias[0*output_dim:1*output_dim]
             beta_bias = bias[1*output_dim:2*output_dim]
@@ -166,8 +173,9 @@ class IntegratorNeuronLayer(nn.Module):
         h: torch.Tensor,
         x: torch.Tensor,
         v: torch.Tensor,
-        step: int = 0
-    ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        step: int = 0,
+        return_aux: bool = True
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
         """
         Forward pass computing one integration step.
 
@@ -176,17 +184,21 @@ class IntegratorNeuronLayer(nn.Module):
             x: Current state [batch_size, output_dim]
             v: Current velocity [batch_size, output_dim]
             step: Current iteration step for deterministic excitation
+            return_aux: If False, skip creating aux dict (performance optimization)
 
         Returns:
             x_next: Next state [batch_size, output_dim]
             v_next: Next velocity [batch_size, output_dim]
-            aux: Dictionary with controller parameters for monitoring
+            aux: Dictionary with controller parameters for monitoring (None if return_aux=False)
         """
-        # Concatenate inputs for controller
-        controller_input = torch.cat([h, x, v], dim=-1)
+        # Process inputs separately then sum (avoids concat overhead)
+        h_proj = self.controller_h(h)
+        x_proj = self.controller_x(x)
+        v_proj = self.controller_v(v)
+        controller_hidden = h_proj + x_proj + v_proj
 
         # Compute all controller parameters in one forward pass (GPU efficient)
-        controller_output = self.controller_mlp(controller_input)
+        controller_output = self.controller_mlp(controller_hidden)
 
         # Split into individual parameters using torch.split (more efficient than slicing)
         alpha_base_raw, beta_raw, gate_raw, v_cand = torch.split(
@@ -198,20 +210,18 @@ class IntegratorNeuronLayer(nn.Module):
         beta = F.softplus(beta_raw)
         gate = torch.sigmoid(gate_raw)
 
-        # Dynamic integration gain (α-control) - avoid branching with torch.where
-        # Use squared norm (faster, no sqrt needed)
-        error_diff = x - self.mu
-        imbalance_sq = (error_diff ** 2).sum(dim=-1, keepdim=True)
-        alpha_dynamic = alpha_base * torch.exp(-self.alpha_kappa * torch.sqrt(imbalance_sq))
-        # Use torch.where to avoid if-branch (better for compilation)
-        alpha = torch.where(
-            self._dynamic_alpha_tensor,
-            alpha_dynamic,
-            alpha_base
-        )
+        # Compute error once (used in both alpha and velocity update)
+        error = x - self.mu
+
+        # Dynamic integration gain (α-control)
+        if self.dynamic_alpha:
+            # Only compute when needed (avoid torch.where overhead)
+            imbalance = torch.norm(error, dim=-1, keepdim=True)
+            alpha = alpha_base * torch.exp(-self.alpha_kappa * imbalance)
+        else:
+            alpha = alpha_base
 
         # Update velocity with error correction term
-        error = x - self.mu
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
         # Add deterministic harmonic excitation (always compute, mask with amplitude)
@@ -227,16 +237,19 @@ class IntegratorNeuronLayer(nn.Module):
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
 
-        # Return auxiliary info for monitoring/loss (avoid Python branching)
-        aux = {
-            'alpha': alpha,
-            'alpha_base': alpha_base,  # Always store alpha_base, no branching
-            'beta': beta,
-            'gate': gate,
-            'v_cand': v_cand,
-            'error': error,
-            'mu': self.mu
-        }
+        # Return auxiliary info for monitoring/loss (only if requested)
+        if return_aux:
+            aux = {
+                'alpha': alpha,
+                'alpha_base': alpha_base,
+                'beta': beta,
+                'gate': gate,
+                'v_cand': v_cand,
+                'error': error,
+                'mu': self.mu
+            }
+        else:
+            aux = None
 
         return x_next, v_next, aux
 
@@ -388,7 +401,8 @@ class IntegratorModel(nn.Module):
 
         # Run integration steps
         for t in range(self.num_iterations):
-            x, v, aux = self.inl(h, x, v, step=t)
+            # Skip aux creation if not needed (performance)
+            x, v, aux = self.inl(h, x, v, step=t, return_aux=return_trajectory)
 
             if return_trajectory:
                 # Store directly in pre-allocated tensors (no detach needed, done at the end)
