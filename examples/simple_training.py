@@ -23,6 +23,7 @@ from torch.utils.data import Dataset, DataLoader
 from inl_llm.models import UltraOptimizedIntegratorLanguageModel
 from inl_llm.core import IntegratorLoss, create_cycle_scheduler
 import pandas as pd
+import json
 
 # Import tokenizer
 try:
@@ -156,9 +157,28 @@ def main():
         try:
             tokenizer = AutoTokenizer.from_pretrained("gpt2")
             tokenizer.pad_token = tokenizer.eos_token
+
+            # Add special tokens for chat format
+            special_tokens = {
+                'additional_special_tokens': ['<USER>', '<ASSISTANT>', '<SYSTEM>', '<ERROR>']
+            }
+            tokenizer.add_special_tokens(special_tokens)
+
+            # Add Jinja chat template
+            tokenizer.chat_template = (
+                "{% for message in messages %}"
+                "{% if message['role'] == 'system' %}<SYSTEM> {{ message['content'] }}"
+                "{% elif message['role'] == 'user' %}<USER> {{ message['content'] }}"
+                "{% elif message['role'] == 'assistant' %}<ASSISTANT> {{ message['content'] }}"
+                "{% endif %}"
+                "{% if not loop.last %}\n{% endif %}"
+                "{% endfor %}"
+            )
+
             vocab_size = tokenizer.vocab_size
             print(f"✅ Tokenizer loaded: GPT-2 BPE (vocab_size={vocab_size})")
             print(f"   Example: 'Hello' -> {tokenizer.encode('Hello')}")
+            print(f"   Chat template added with tokens: <USER>, <ASSISTANT>, <SYSTEM>, <ERROR>")
         except Exception as e:
             print(f"❌ Failed to load tokenizer: {e}")
             tokenizer = None
@@ -184,8 +204,10 @@ def main():
 
     # Create custom 1B parameter model
     print("\nCreating custom 1B parameter model (all optimizations enabled)...")
+    # Adjust vocab_size if special tokens were added
+    actual_vocab_size = len(tokenizer) if tokenizer else vocab_size
     model = UltraOptimizedIntegratorLanguageModel(
-        vocab_size=vocab_size,
+        vocab_size=actual_vocab_size,
         d_model=1600,           # Dimension du modèle (augmenté de 1536 à 1600)
         num_layers=28,          # Nombre de couches
         num_heads=25,           # Nombre de têtes d'attention (1600/25 = 64 dim par tête)
@@ -286,22 +308,72 @@ def main():
     torch.save(model.state_dict(), model_path)
     print(f"\n💾 Model saved to: {model_path}")
 
+    # Save model config.json
+    config = {
+        "architectures": ["UltraOptimizedIntegratorLanguageModel"],
+        "model_type": "inl-llm",
+        "transformers_version": "4.57.0",
+
+        # Architecture
+        "vocab_size": actual_vocab_size,
+        "d_model": 1600,
+        "num_layers": 28,
+        "num_heads": 25,
+        "num_iterations_per_layer": 10,
+        "feedforward_dim": 6400,
+        "max_seq_len": 2048,
+        "dropout": 0.1,
+
+        # Token IDs (from tokenizer)
+        "bos_token_id": tokenizer.bos_token_id if tokenizer else 1,
+        "eos_token_id": tokenizer.eos_token_id if tokenizer else 2,
+        "pad_token_id": tokenizer.pad_token_id if tokenizer else 0,
+        "unk_token_id": tokenizer.unk_token_id if tokenizer else 3,
+
+        # Optimizations
+        "use_lowrank_embeddings": True,
+        "lowrank_ratio": 0.125,
+        "use_gradient_checkpointing": True,
+        "use_shared_controllers": True,
+        "use_adaptive_stopping": True,
+        "adaptive_convergence_threshold": 0.001,
+        "hierarchical_group_size": 64,
+        "excitation_sparsity": 0.1,
+
+        # Training config
+        "dtype": "bfloat16",
+        "use_cache": True,
+        "initializer_range": 0.02,
+
+        # INL-LLM specific
+        "integrator_type": "ultra_optimized",
+        "controller_type": "shared",
+        "equilibrium_type": "hierarchical",
+        "excitation_type": "sparse_harmonic"
+    }
+
+    config_path = os.path.join(save_dir, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config, f, indent=2)
+    print(f"💾 Model config saved to: {config_path}")
+
     # Save tokenizer (if available)
     if tokenizer:
         tokenizer.save_pretrained(save_dir)
         print(f"💾 Tokenizer saved to: {save_dir}")
-        print(f"   Files: vocab.json, merges.txt, tokenizer_config.json")
+        print(f"   Files: vocab.json, merges.txt, tokenizer_config.json (with Jinja chat template)")
 
     print(f"\n✅ Complete checkpoint saved to: {save_dir}")
+    print(f"   📦 Files: pytorch_model.pt, config.json, tokenizer files")
 
     # Test generation
     print("\nTesting generation...")
     model.eval()
     with torch.no_grad():
         if tokenizer:
-            # Test with real text
+            # Test 1: Simple text generation
             prompt_text = "Once upon a time"
-            print(f"\n📝 Prompt: '{prompt_text}'")
+            print(f"\n📝 Test 1 - Simple Prompt: '{prompt_text}'")
 
             # Tokenize
             prompt_ids = tokenizer.encode(prompt_text, return_tensors='pt').to(device)
@@ -320,6 +392,34 @@ def main():
             generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
             print(f"\n🎯 Generated text:")
             print(f"   {generated_text}")
+
+            # Test 2: Chat template usage
+            print(f"\n📝 Test 2 - Chat Template (Jinja):")
+            messages = [
+                {"role": "user", "content": "What is machine learning?"},
+                {"role": "assistant", "content": "Machine learning is a subset of AI that enables systems to learn from data."},
+                {"role": "user", "content": "Give me an example"}
+            ]
+
+            # Apply chat template
+            chat_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            print(f"\n🔤 Formatted conversation:")
+            print(chat_text)
+
+            # Tokenize and generate response
+            chat_ids = tokenizer.encode(chat_text, return_tensors='pt').to(device)
+            chat_output = model.generate(
+                chat_ids,
+                max_new_tokens=50,
+                temperature=0.7,
+                top_p=0.9,
+                do_sample=True
+            )
+
+            # Decode the response
+            response = tokenizer.decode(chat_output[0][chat_ids.shape[1]:], skip_special_tokens=True)
+            print(f"\n🤖 Assistant response:")
+            print(f"   {response}")
         else:
             # Test with synthetic data
             prompt = torch.randint(0, vocab_size, (1, 10)).to(device)
