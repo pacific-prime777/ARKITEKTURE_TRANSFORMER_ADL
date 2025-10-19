@@ -3,13 +3,14 @@ Simple training example for INL-LLM
 
 This script demonstrates basic training with:
 - Optimized model (Level 1 + 2)
-- Synthetic data (1000 samples, 20 epochs)
+- Real text data from parquet file (785 samples)
 - Equilibrium-exploration cycles
 - Adaptive early stopping (3× faster inference)
 
-NOTE: Generation quality will be poor until loss < 2.0
-      Currently training on synthetic patterns, not real text.
-      For production: use real text data (WikiText, OpenWebText, etc.)
+Dataset: part_000000.parquet
+- Contains 785 real text samples
+- Tokenized using GPT-2 BPE tokenizer
+- Sequence length: 64 tokens
 """
 
 import sys
@@ -21,6 +22,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from inl_llm.models import UltraOptimizedIntegratorLanguageModel
 from inl_llm.core import IntegratorLoss, create_cycle_scheduler
+import pandas as pd
 
 # Import tokenizer
 try:
@@ -31,64 +33,55 @@ except ImportError:
     print("⚠️ transformers not installed. Install with: pip install transformers")
 
 
-class SimpleTextDataset(Dataset):
-    """Simple synthetic dataset with learnable patterns (not pure random)."""
+class ParquetTextDataset(Dataset):
+    """Dataset loader for parquet files with text data."""
 
-    def __init__(self, vocab_size=5000, num_samples=1000, seq_len=128, tokenizer=None):
-        self.vocab_size = vocab_size
-        self.num_samples = num_samples
+    def __init__(self, parquet_path, seq_len=128, tokenizer=None):
         self.seq_len = seq_len
         self.tokenizer = tokenizer
 
-        # If tokenizer is provided, generate realistic text samples
-        if tokenizer:
-            print("  🔤 Generating text dataset with GPT-2 tokenizer...")
-            self.samples = self._generate_text_samples()
-        else:
-            self.samples = None
+        if tokenizer is None:
+            raise ValueError("Tokenizer is required for ParquetTextDataset")
 
-    def _generate_text_samples(self):
-        """Generate simple text patterns that the model can learn."""
-        templates = [
-            "The quick brown fox jumps over the lazy dog. ",
-            "Once upon a time, there was a beautiful princess. ",
-            "In a galaxy far, far away, there lived many creatures. ",
-            "The rain in Spain falls mainly on the plain. ",
-            "To be or not to be, that is the question. ",
-            "All that glitters is not gold. ",
-            "A journey of a thousand miles begins with a single step. ",
-            "The early bird catches the worm. ",
-            "Actions speak louder than words. ",
-            "Where there's a will, there's a way. ",
-        ]
+        print(f"  📂 Loading dataset from {parquet_path}...")
+        df = pd.read_parquet(parquet_path)
 
-        samples = []
-        for i in range(self.num_samples):
-            # Create varied text by repeating and combining templates
-            text = templates[i % len(templates)] * 3  # Repeat for longer sequences
-            # Tokenize
-            tokens = self.tokenizer.encode(text, max_length=self.seq_len+1, truncation=True)
-            # Pad if needed
-            if len(tokens) < self.seq_len + 1:
-                tokens = tokens + [self.tokenizer.pad_token_id] * (self.seq_len + 1 - len(tokens))
-            samples.append(torch.tensor(tokens[:self.seq_len+1]))
+        if 'text' not in df.columns:
+            raise ValueError("Parquet file must contain a 'text' column")
 
-        return samples
+        print(f"  📊 Dataset contains {len(df)} text samples")
+        print(f"  🔤 Tokenizing text samples...")
+
+        self.samples = []
+        for idx, text in enumerate(df['text']):
+            if pd.notna(text) and len(str(text).strip()) > 0:
+                # Tokenize the text
+                tokens = self.tokenizer.encode(
+                    str(text),
+                    max_length=self.seq_len + 1,
+                    truncation=True
+                )
+
+                # Only keep samples with enough tokens
+                if len(tokens) > 10:  # Minimum length
+                    # Pad if needed
+                    if len(tokens) < self.seq_len + 1:
+                        tokens = tokens + [self.tokenizer.pad_token_id] * (self.seq_len + 1 - len(tokens))
+
+                    self.samples.append(torch.tensor(tokens[:self.seq_len + 1]))
+
+            if (idx + 1) % 100 == 0:
+                print(f"    Processed {idx + 1}/{len(df)} samples...")
+
+        print(f"  ✅ Dataset ready: {len(self.samples)} valid samples")
+        self.num_samples = len(self.samples)
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        if self.samples is not None:
-            # Real tokenized text
-            seq = self.samples[idx]
-            return seq[:-1], seq[1:]
-        else:
-            # Fallback: synthetic patterns
-            base_pattern = torch.arange(0, self.seq_len) % min(100, self.vocab_size)
-            noise = torch.randint(-5, 6, (self.seq_len,))
-            seq = (base_pattern + noise + idx * 7) % self.vocab_size
-            return seq[:-1], seq[1:]
+        seq = self.samples[idx]
+        return seq[:-1], seq[1:]
 
 
 def train_epoch(model, dataloader, loss_fn, optimizer, scheduler, device='cpu', epoch=0):
@@ -179,7 +172,7 @@ def main():
 
     # Configuration
     batch_size = 2
-    num_epochs = 20  # ✅ Increased from 3 to 20 for better convergence
+    num_epochs = 10  # ✅ Increased from 3 to 20 for better convergence
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print(f"\nConfiguration:")
@@ -213,11 +206,15 @@ def main():
 
     # Create dataset and dataloader
     print("\nCreating dataset...")
-    dataset = SimpleTextDataset(
-        vocab_size=vocab_size,
-        num_samples=1000,  # ✅ Increased from 100
+    parquet_path = os.path.join(os.path.dirname(__file__), 'part_000000.parquet')
+
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Dataset not found at {parquet_path}")
+
+    dataset = ParquetTextDataset(
+        parquet_path=parquet_path,
         seq_len=64,
-        tokenizer=tokenizer  # ✅ Pass tokenizer to use real text instead of synthetic tokens
+        tokenizer=tokenizer
     )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
