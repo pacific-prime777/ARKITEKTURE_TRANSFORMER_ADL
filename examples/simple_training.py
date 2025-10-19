@@ -14,8 +14,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from inl_llm import create_model
+from inl_llm.models import UltraOptimizedIntegratorLanguageModel
 from inl_llm.core import IntegratorLoss, create_cycle_scheduler
+
+# Import tokenizer
+try:
+    from transformers import AutoTokenizer
+    TOKENIZER_AVAILABLE = True
+except ImportError:
+    TOKENIZER_AVAILABLE = False
+    print("⚠️ transformers not installed. Install with: pip install transformers")
 
 
 class SimpleTextDataset(Dataset):
@@ -78,23 +86,47 @@ def main():
     print("SIMPLE TRAINING EXAMPLE - INL-LLM")
     print("="*70)
 
+    # Load tokenizer
+    print("\nLoading tokenizer...")
+    if TOKENIZER_AVAILABLE:
+        tokenizer = AutoTokenizer.from_pretrained("gpt2")
+        tokenizer.pad_token = tokenizer.eos_token
+        vocab_size = tokenizer.vocab_size
+        print(f"✅ Tokenizer loaded: GPT-2 (vocab_size={vocab_size})")
+    else:
+        tokenizer = None
+        vocab_size = 50000
+        print(f"⚠️ Using synthetic data (vocab_size={vocab_size})")
+
     # Configuration
-    vocab_size = 5000
-    batch_size = 4
-    num_epochs = 10
+    batch_size = 2
+    num_epochs = 3
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print(f"\nConfiguration:")
+    print(f"  Model size: 1B parameters")
     print(f"  Vocab size: {vocab_size}")
     print(f"  Batch size: {batch_size}")
     print(f"  Epochs: {num_epochs}")
     print(f"  Device: {device}")
 
-    # Create model
-    print("\nCreating model (all optimizations enabled)...")
-    model = create_model(
-        size='small',
-        vocab_size=vocab_size
+    # Create custom 1B parameter model
+    print("\nCreating custom 1B parameter model (all optimizations enabled)...")
+    model = UltraOptimizedIntegratorLanguageModel(
+        vocab_size=vocab_size,
+        d_model=1600,           # Dimension du modèle (augmenté de 1536 à 1600)
+        num_layers=28,          # Nombre de couches
+        num_heads=25,           # Nombre de têtes d'attention (1600/25 = 64 dim par tête)
+        num_iterations_per_layer=10,  # Itérations par couche
+        feedforward_dim=6400,   # Dimension FFN (4x d_model)
+        max_seq_len=2048,
+        # Toutes les optimizations activées
+        use_lowrank_embeddings=True,
+        lowrank_ratio=0.125,
+        use_gradient_checkpointing=True,
+        use_shared_controllers=True,
+        hierarchical_group_size=64,
+        excitation_sparsity=0.1
     )
     model = model.to(device)
 
@@ -146,16 +178,40 @@ def main():
     print("\nTesting generation...")
     model.eval()
     with torch.no_grad():
-        prompt = torch.randint(0, vocab_size, (1, 10)).to(device)
-        output = model.generate(
-            prompt,
-            max_new_tokens=50,
-            temperature=0.8,
-            top_p=0.9,
-            do_sample=True
-        )
-        print(f"Generated {output.size(1)} tokens")
-        print(f"Output shape: {output.shape}")
+        if tokenizer:
+            # Test with real text
+            prompt_text = "Once upon a time"
+            print(f"\n📝 Prompt: '{prompt_text}'")
+
+            # Tokenize
+            prompt_ids = tokenizer.encode(prompt_text, return_tensors='pt').to(device)
+            print(f"   Tokenized: {prompt_ids.shape}")
+
+            # Generate
+            output = model.generate(
+                prompt_ids,
+                max_new_tokens=50,
+                temperature=0.8,
+                top_p=0.9,
+                do_sample=True
+            )
+
+            # Decode
+            generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+            print(f"\n🎯 Generated text:")
+            print(f"   {generated_text}")
+        else:
+            # Test with synthetic data
+            prompt = torch.randint(0, vocab_size, (1, 10)).to(device)
+            output = model.generate(
+                prompt,
+                max_new_tokens=50,
+                temperature=0.8,
+                top_p=0.9,
+                do_sample=True
+            )
+            print(f"Generated {output.size(1)} tokens")
+            print(f"Output shape: {output.shape}")
 
     print("\n✅ Example completed successfully!")
 
