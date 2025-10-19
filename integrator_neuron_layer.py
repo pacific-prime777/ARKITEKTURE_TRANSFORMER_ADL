@@ -177,11 +177,10 @@ class IntegratorNeuronLayer(nn.Module):
 
         # Dynamic integration gain (α-control)
         if self.dynamic_alpha:
-            # Compute imbalance as deviation from equilibrium
-            x_mean = x.mean(dim=0, keepdim=True)
-            imbalance = torch.norm(x - x_mean, dim=-1, keepdim=True)
-            # Modulate alpha based on imbalance
-            alpha = alpha_base * (1.0 - torch.exp(-self.alpha_kappa * imbalance))
+            # Compute imbalance as deviation from equilibrium attractor
+            imbalance = torch.norm(x - self.mu, dim=-1, keepdim=True)
+            # Reduce alpha (increase correction) when far from equilibrium
+            alpha = alpha_base * torch.exp(-self.alpha_kappa * imbalance)
         else:
             alpha = alpha_base
 
