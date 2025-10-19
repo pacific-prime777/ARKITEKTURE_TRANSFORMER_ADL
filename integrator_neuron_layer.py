@@ -12,6 +12,7 @@ Key features:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 from typing import Optional, Tuple, Dict
 
 
@@ -82,8 +83,9 @@ class IntegratorNeuronLayer(nn.Module):
         self.excitation_amplitude = excitation_amplitude
         # Learnable frequency and phase per dimension
         self.excitation_gamma = nn.Parameter(torch.randn(output_dim) * 0.1 + 1.0)
-        self.excitation_phi = nn.Parameter(torch.randn(output_dim) * 2 * 3.14159)
-        self.register_buffer('global_step', torch.tensor(0))
+        self.excitation_phi = nn.Parameter(torch.randn(output_dim) * 2 * math.pi)
+        # Global step counter (increments in both train and eval for determinism)
+        self.register_buffer('global_step', torch.tensor(0, dtype=torch.long))
 
         # Input dimension for controller: [h, x, v]
         controller_input_dim = hidden_dim + 2 * output_dim
@@ -97,7 +99,8 @@ class IntegratorNeuronLayer(nn.Module):
         # Initialize to produce init_alpha
         with torch.no_grad():
             self.mlp_alpha[-1].bias.fill_(self._inverse_sigmoid(init_alpha))
-            self.mlp_alpha[-1].weight.fill_(0.0)
+            # Small random initialization for symmetry breaking
+            self.mlp_alpha[-1].weight.normal_(0.0, 0.01)
 
         # MLP for beta (correction coefficient) - output >= 0
         self.mlp_beta = nn.Sequential(
@@ -108,7 +111,8 @@ class IntegratorNeuronLayer(nn.Module):
         # Initialize to produce init_beta
         with torch.no_grad():
             self.mlp_beta[-1].bias.fill_(self._inverse_softplus(init_beta))
-            self.mlp_beta[-1].weight.fill_(0.0)
+            # Small random initialization for symmetry breaking
+            self.mlp_beta[-1].weight.normal_(0.0, 0.01)
 
         # MLP for gating g - output in (0, 1)
         self.mlp_gate = nn.Sequential(
@@ -119,7 +123,8 @@ class IntegratorNeuronLayer(nn.Module):
         # Initialize to produce init_gate
         with torch.no_grad():
             self.mlp_gate[-1].bias.fill_(self._inverse_sigmoid(init_gate))
-            self.mlp_gate[-1].weight.fill_(0.0)
+            # Small random initialization for symmetry breaking
+            self.mlp_gate[-1].weight.normal_(0.0, 0.01)
 
         # MLP for candidate velocity v_cand
         self.mlp_v_cand = nn.Sequential(
@@ -130,7 +135,8 @@ class IntegratorNeuronLayer(nn.Module):
         # Initialize to produce small velocities
         with torch.no_grad():
             self.mlp_v_cand[-1].bias.fill_(0.0)
-            self.mlp_v_cand[-1].weight.fill_(0.0)
+            # Small random initialization for symmetry breaking
+            self.mlp_v_cand[-1].weight.normal_(0.0, 0.01)
 
     @staticmethod
     def _inverse_sigmoid(y: float) -> float:
@@ -194,9 +200,8 @@ class IntegratorNeuronLayer(nn.Module):
             )
             v_next = v_next + harmonic_noise.unsqueeze(0)
 
-            # Increment global step counter
-            if self.training:
-                self.global_step += 1
+            # Increment global step counter (in both train and eval for determinism)
+            self.global_step += 1
 
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
@@ -227,7 +232,7 @@ class IntegratorNeuronLayer(nn.Module):
             v0: Initial velocity [batch_size, output_dim] initialized to 0
         """
         # Initialize to current learned equilibrium
-        x0 = self.mu.unsqueeze(0).expand(batch_size, -1).to(device)
+        x0 = self.mu.unsqueeze(0).expand(batch_size, -1)
         v0 = torch.zeros((batch_size, self.output_dim), device=device)
         return x0, v0
 
