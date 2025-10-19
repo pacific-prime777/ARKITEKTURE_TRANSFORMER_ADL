@@ -39,7 +39,6 @@ class IntegratorNeuronLayer(nn.Module):
         velocity_scale: float = 1.0,
         excitation_amplitude: float = 0.03,
         learnable_mu: bool = True,
-        mu_adaptation_rate: float = 1e-4,
         dynamic_alpha: bool = True,
         alpha_kappa: float = 1.0
     ):
@@ -56,7 +55,6 @@ class IntegratorNeuronLayer(nn.Module):
             velocity_scale: Scale factor for velocity
             excitation_amplitude: Amplitude of deterministic harmonic noise
             learnable_mu: Use learnable equilibrium attractor
-            mu_adaptation_rate: Learning rate for mu adaptation
             dynamic_alpha: Use dynamic integration gain (α-control)
             alpha_kappa: Sensitivity parameter for dynamic alpha
         """
@@ -72,7 +70,6 @@ class IntegratorNeuronLayer(nn.Module):
         # Learnable equilibrium attractor
         if learnable_mu:
             self.mu = nn.Parameter(torch.full((output_dim,), target_value))
-            self.mu_adaptation_rate = mu_adaptation_rate
             self.learnable_mu = True
         else:
             self.register_buffer('mu', torch.full((output_dim,), target_value))
