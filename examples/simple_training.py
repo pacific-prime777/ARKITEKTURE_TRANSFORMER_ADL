@@ -27,7 +27,7 @@ except ImportError:
 
 
 class SimpleTextDataset(Dataset):
-    """Simple synthetic dataset for demo purposes."""
+    """Simple synthetic dataset with learnable patterns (not pure random)."""
 
     def __init__(self, vocab_size=5000, num_samples=1000, seq_len=128):
         self.vocab_size = vocab_size
@@ -38,13 +38,16 @@ class SimpleTextDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # Generate random sequences
-        seq = torch.randint(0, self.vocab_size, (self.seq_len,))
+        # Generate structured sequences with patterns (easier to learn than pure random)
+        # Use mix of: counting sequences, repeated patterns, and some randomness
+        base_pattern = torch.arange(0, self.seq_len) % min(100, self.vocab_size)
+        noise = torch.randint(-5, 6, (self.seq_len,))  # Small perturbations
+        seq = (base_pattern + noise + idx * 7) % self.vocab_size  # Add variety per sample
         # Target is shifted by 1 (next token prediction)
         return seq[:-1], seq[1:]
 
 
-def train_epoch(model, dataloader, loss_fn, optimizer, device='cpu'):
+def train_epoch(model, dataloader, loss_fn, optimizer, scheduler, device='cpu', epoch=0):
     """Train for one epoch."""
     model.train()
     total_loss = 0
@@ -60,11 +63,30 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device='cpu'):
         logits_flat = logits.view(-1, logits.size(-1))
         targets_flat = targets.view(-1)
 
-        # Compute losses
-        task_loss = nn.CrossEntropyLoss()(logits_flat, targets_flat)
+        # ✅ FIX #1: Use IntegratorLoss with trajectory (was only using CrossEntropyLoss)
+        if loss_fn is not None and trajectory is not None:
+            # Use full IntegratorLoss with all components
+            loss_components = loss_fn(
+                predictions=logits_flat,
+                targets=targets_flat,
+                trajectory=trajectory,
+                epoch=epoch
+            )
+            loss = loss_components['total']
 
-        # For integrator loss, we'd need trajectory - simplified here
-        loss = task_loss
+            # Log detailed loss components occasionally
+            if batch_idx % 10 == 0:
+                L_task = loss_components.get('L_task', 0)
+                L_mean = loss_components.get('L_mean', 0)
+                L_speed = loss_components.get('L_speed', 0)
+                L_energy = loss_components.get('L_energy', 0)
+                print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f} '
+                      f'[Task: {L_task:.4f}, Mean: {L_mean:.4f}, Speed: {L_speed:.4f}, Energy: {L_energy:.4f}]')
+        else:
+            # Fallback to simple CrossEntropy
+            loss = nn.CrossEntropyLoss()(logits_flat, targets_flat)
+            if batch_idx % 10 == 0:
+                print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
         # Backward
         optimizer.zero_grad()
@@ -72,11 +94,12 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device='cpu'):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
+        # ✅ FIX #3: Update learning rate scheduler
+        if scheduler is not None:
+            scheduler.step()
+
         total_loss += loss.item()
         num_batches += 1
-
-        if batch_idx % 10 == 0:
-            print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
 
     return total_loss / num_batches
 
@@ -137,8 +160,31 @@ def main():
     dataset = SimpleTextDataset(vocab_size=vocab_size, num_samples=100, seq_len=64)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Create optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    # ✅ FIX #3: Lower learning rate for large model (was 3e-4, too high)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5, weight_decay=0.01)
+
+    # Add learning rate scheduler with warmup
+    from torch.optim.lr_scheduler import OneCycleLR
+    total_steps = num_epochs * len(dataloader)
+    lr_scheduler = OneCycleLR(
+        optimizer,
+        max_lr=5e-5,
+        total_steps=total_steps,
+        pct_start=0.1,  # 10% warmup
+        anneal_strategy='cos'
+    )
+    print(f"✅ Optimizer: AdamW with lr=5e-5, warmup={int(0.1*total_steps)} steps")
+
+    # ✅ FIX #1: Create IntegratorLoss (was not being used at all)
+    integrator_loss_fn = IntegratorLoss(
+        target_value=5.0,
+        lambda_mean_init=1.0,
+        lambda_speed=0.1,
+        lambda_energy=0.01,
+        annealing_epochs=num_epochs,
+        variance_weighted=True
+    )
+    print(f"✅ Loss function: IntegratorLoss with trajectory-based regularization")
 
     # Create scheduler (optional)
     cycle_scheduler = create_cycle_scheduler(preset='balanced')
@@ -154,9 +200,13 @@ def main():
         phase_info = cycle_scheduler.step(epoch)
         print(f"  Phase: {phase_info['phase_name']}")
 
-        # Train
-        avg_loss = train_epoch(model, dataloader, None, optimizer, device)
+        # Update IntegratorLoss phase
+        integrator_loss_fn.set_exploration_phase(phase_info['phase_name'] == 'exploration')
+
+        # Train with IntegratorLoss
+        avg_loss = train_epoch(model, dataloader, integrator_loss_fn, optimizer, lr_scheduler, device, epoch)
         print(f"  Average Loss: {avg_loss:.4f}")
+        print(f"  Current LR: {optimizer.param_groups[0]['lr']:.2e}")
 
         # Get inference stats (adaptive early stopping)
         if epoch % 2 == 0:
