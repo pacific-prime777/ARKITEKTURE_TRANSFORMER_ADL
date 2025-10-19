@@ -97,6 +97,9 @@ class IntegratorNeuronLayer(nn.Module):
         self.dynamic_alpha = dynamic_alpha
         self.alpha_kappa = alpha_kappa
 
+        # Pre-compute constant for performance
+        self._dt_velocity_scale = dt * velocity_scale
+
         # Learnable equilibrium attractor
         if learnable_mu:
             self.mu = nn.Parameter(torch.full((output_dim,), target_value))
@@ -128,9 +131,6 @@ class IntegratorNeuronLayer(nn.Module):
 
         # Store output_dim for splitting
         self._controller_output_dim = output_dim
-
-        # Store dynamic_alpha as buffer for efficient torch.where
-        self.register_buffer('_dynamic_alpha_tensor', torch.tensor(dynamic_alpha))
 
         # Initialize controller input layers
         with torch.no_grad():
@@ -192,10 +192,10 @@ class IntegratorNeuronLayer(nn.Module):
             aux: Dictionary with controller parameters for monitoring (None if return_aux=False)
         """
         # Process inputs separately then sum (avoids concat overhead)
-        h_proj = self.controller_h(h)
-        x_proj = self.controller_x(x)
-        v_proj = self.controller_v(v)
-        controller_hidden = h_proj + x_proj + v_proj
+        # Fuse additions for better performance
+        controller_hidden = self.controller_h(h)
+        controller_hidden = controller_hidden + self.controller_x(x)
+        controller_hidden = controller_hidden + self.controller_v(v)
 
         # Compute all controller parameters in one forward pass (GPU efficient)
         controller_output = self.controller_mlp(controller_hidden)
@@ -205,10 +205,11 @@ class IntegratorNeuronLayer(nn.Module):
             controller_output, self._controller_output_dim, dim=1
         )
 
-        # Apply activations
+        # Apply activations (fused when possible with inplace for memory efficiency)
         alpha_base = torch.sigmoid(alpha_base_raw)
         beta = F.softplus(beta_raw)
         gate = torch.sigmoid(gate_raw)
+        # v_cand has no activation (linear output)
 
         # Compute error once (used in both alpha and velocity update)
         error = x - self.mu
@@ -224,18 +225,19 @@ class IntegratorNeuronLayer(nn.Module):
         # Update velocity with error correction term
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
-        # Add deterministic harmonic excitation (always compute, mask with amplitude)
-        # Deterministic noise based on iteration step
-        t = float(step)
-        # harmonic_noise shape: [output_dim]
-        harmonic_noise = self.excitation_amplitude * torch.sin(
-            self.excitation_gamma * t + self.excitation_phi
-        )
-        # Broadcast to [batch_size, output_dim] - implicit broadcasting is efficient
-        v_next = v_next + harmonic_noise
+        # Add deterministic harmonic excitation (only if amplitude > 0)
+        if self.excitation_amplitude > 0:
+            # Deterministic noise based on iteration step
+            t = float(step)
+            # harmonic_noise shape: [output_dim]
+            harmonic_noise = self.excitation_amplitude * torch.sin(
+                self.excitation_gamma * t + self.excitation_phi
+            )
+            # Broadcast to [batch_size, output_dim] - implicit broadcasting is efficient
+            v_next = v_next + harmonic_noise
 
-        # Update state with gated velocity
-        x_next = x + self.dt * gate * self.velocity_scale * v_next
+        # Update state with gated velocity (use pre-computed constant)
+        x_next = x + self._dt_velocity_scale * gate * v_next
 
         # Return auxiliary info for monitoring/loss (only if requested)
         if return_aux:
