@@ -231,6 +231,151 @@ class AdaptiveIntegratorNeuronLayer(nn.Module):
         self.num_forwards.zero_()
 
 
+class AdaptiveHierarchicalINL(nn.Module):
+    """
+    Adaptive wrapper for HierarchicalEquilibriumINL with early stopping.
+
+    Specifically designed for INL blocks in language models.
+    Monitors velocity (rate of change) instead of error for convergence detection.
+    """
+
+    def __init__(
+        self,
+        inl_layer: nn.Module,
+        convergence_threshold: float = 0.001,
+        min_iterations: int = 3,
+        max_iterations: int = 12,
+        check_interval: int = 1
+    ):
+        """
+        Args:
+            inl_layer: HierarchicalEquilibriumINL to wrap
+            convergence_threshold: Velocity threshold for early stopping
+            min_iterations: Minimum iterations before checking convergence
+            max_iterations: Maximum iterations (used during training)
+            check_interval: Check convergence every N iterations
+        """
+        super().__init__()
+
+        self.inl = inl_layer
+        self.convergence_threshold = convergence_threshold
+        self.min_iterations = min_iterations
+        self.max_iterations = max_iterations
+        self.check_interval = check_interval
+
+        # Statistics tracking
+        self.register_buffer('avg_iterations', torch.tensor(0.0))
+        self.register_buffer('num_forwards', torch.tensor(0))
+
+    def forward(
+        self,
+        h: torch.Tensor,
+        x: torch.Tensor,
+        v: torch.Tensor,
+        step: int = 0
+    ):
+        """
+        Forward pass - compatible with INL block usage.
+
+        Note: For use in INL blocks, this is called per-iteration.
+        Early stopping is handled at the block level.
+        """
+        return self.inl(h, x, v, step)
+
+    def forward_adaptive(
+        self,
+        h: torch.Tensor,
+        initial_x: torch.Tensor,
+        initial_v: torch.Tensor,
+        num_iterations: Optional[int] = None,
+        use_early_stopping: bool = None,
+        return_trajectory: bool = False
+    ):
+        """
+        Full adaptive forward with early stopping control.
+
+        Use this method when you want full control over iterations.
+        """
+        batch_size = h.shape[0]
+        device = h.device
+
+        if num_iterations is None:
+            num_iterations = self.max_iterations
+
+        if use_early_stopping is None:
+            use_early_stopping = not self.training
+
+        x, v = initial_x, initial_v
+
+        # Track trajectory if needed
+        x_traj = [x.clone()] if return_trajectory else None
+        v_traj = [v.clone()] if return_trajectory else None
+
+        converged = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        iterations_used = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+        for t in range(num_iterations):
+            x_prev = x.clone()
+
+            # Run integration step
+            x_next, v_next, aux = self.inl(h, x, v, step=t)
+
+            # Update iterations counter for non-converged samples
+            iterations_used[~converged] += 1
+
+            # Check convergence based on velocity (rate of change)
+            if use_early_stopping and t >= self.min_iterations and t % self.check_interval == 0:
+                # Compute change in state
+                delta_x = torch.norm(x_next - x_prev, dim=-1)  # [batch_size]
+
+                # Mark newly converged samples
+                newly_converged = (delta_x < self.convergence_threshold) & (~converged)
+                converged = converged | newly_converged
+
+                # If all samples converged, stop early
+                if converged.all():
+                    x, v = x_next, v_next
+                    if return_trajectory:
+                        x_traj.append(x.clone())
+                        v_traj.append(v.clone())
+                    break
+
+            x, v = x_next, v_next
+
+            if return_trajectory:
+                x_traj.append(x.clone())
+                v_traj.append(v.clone())
+
+        # Update statistics (exponential moving average)
+        if not self.training:
+            avg_iters = iterations_used.float().mean()
+            self.num_forwards += 1
+            alpha = 0.99
+            self.avg_iterations = alpha * self.avg_iterations + (1 - alpha) * avg_iters
+
+        result = {
+            'x': x,
+            'v': v,
+            'iterations_used': iterations_used,
+            'converged': converged,
+            'avg_iterations': self.avg_iterations.item(),
+            'mu': aux.get('mu'),
+            'mu_global': aux.get('mu_global'),
+            'mu_offsets': aux.get('mu_offsets')
+        }
+
+        if return_trajectory:
+            result['x_trajectory'] = torch.stack(x_traj, dim=1)  # [B, T+1, D]
+            result['v_trajectory'] = torch.stack(v_traj, dim=1)
+
+        return x, v, result
+
+    def reset_statistics(self):
+        """Reset tracking statistics."""
+        self.avg_iterations.zero_()
+        self.num_forwards.zero_()
+
+
 class GradientCheckpointedINL(nn.Module):
     """
     Wrapper for IntegratorNeuronLayer with gradient checkpointing.

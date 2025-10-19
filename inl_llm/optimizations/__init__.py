@@ -17,6 +17,7 @@ Level 2 (Research/Experimental):
 from .optimizations import (
     LowRankEmbedding,
     AdaptiveIntegratorNeuronLayer,
+    AdaptiveHierarchicalINL,
     GradientCheckpointedINL,
     compute_parameter_reduction,
     print_optimization_summary
@@ -35,6 +36,7 @@ __all__ = [
     # Level 1
     'LowRankEmbedding',
     'AdaptiveIntegratorNeuronLayer',
+    'AdaptiveHierarchicalINL',
     'GradientCheckpointedINL',
     'compute_parameter_reduction',
     'print_optimization_summary',
