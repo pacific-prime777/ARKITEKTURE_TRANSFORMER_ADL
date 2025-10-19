@@ -129,6 +129,9 @@ class IntegratorNeuronLayer(nn.Module):
         # Store output_dim for splitting
         self._controller_output_dim = output_dim
 
+        # Store dynamic_alpha as buffer for efficient torch.where
+        self.register_buffer('_dynamic_alpha_tensor', torch.tensor(dynamic_alpha))
+
         # Initialize to produce desired initial values
         with torch.no_grad():
             # Split the bias into 4 parts
@@ -185,12 +188,10 @@ class IntegratorNeuronLayer(nn.Module):
         # Compute all controller parameters in one forward pass (GPU efficient)
         controller_output = self.controller_mlp(controller_input)
 
-        # Split into individual parameters
-        output_dim = self._controller_output_dim
-        alpha_base_raw = controller_output[:, 0*output_dim:1*output_dim]
-        beta_raw = controller_output[:, 1*output_dim:2*output_dim]
-        gate_raw = controller_output[:, 2*output_dim:3*output_dim]
-        v_cand = controller_output[:, 3*output_dim:4*output_dim]
+        # Split into individual parameters using torch.split (more efficient than slicing)
+        alpha_base_raw, beta_raw, gate_raw, v_cand = torch.split(
+            controller_output, self._controller_output_dim, dim=1
+        )
 
         # Apply activations
         alpha_base = torch.sigmoid(alpha_base_raw)
@@ -198,11 +199,13 @@ class IntegratorNeuronLayer(nn.Module):
         gate = torch.sigmoid(gate_raw)
 
         # Dynamic integration gain (α-control) - avoid branching with torch.where
-        imbalance = torch.norm(x - self.mu, dim=-1, keepdim=True)
-        alpha_dynamic = alpha_base * torch.exp(-self.alpha_kappa * imbalance)
+        # Use squared norm (faster, no sqrt needed)
+        error_diff = x - self.mu
+        imbalance_sq = (error_diff ** 2).sum(dim=-1, keepdim=True)
+        alpha_dynamic = alpha_base * torch.exp(-self.alpha_kappa * torch.sqrt(imbalance_sq))
         # Use torch.where to avoid if-branch (better for compilation)
         alpha = torch.where(
-            torch.tensor(self.dynamic_alpha, device=x.device),
+            self._dynamic_alpha_tensor,
             alpha_dynamic,
             alpha_base
         )
@@ -224,10 +227,10 @@ class IntegratorNeuronLayer(nn.Module):
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
 
-        # Return auxiliary info for monitoring/loss
+        # Return auxiliary info for monitoring/loss (avoid Python branching)
         aux = {
             'alpha': alpha,
-            'alpha_base': alpha_base if self.dynamic_alpha else alpha,
+            'alpha_base': alpha_base,  # Always store alpha_base, no branching
             'beta': beta,
             'gate': gate,
             'v_cand': v_cand,
@@ -375,9 +378,9 @@ class IntegratorModel(nn.Module):
 
         # Store trajectory if requested (pre-allocate for efficiency)
         if return_trajectory:
-            # Pre-allocate tensors instead of using lists
-            x_traj = torch.zeros(batch_size, self.num_iterations + 1, self.output_dim, device=device)
-            v_traj = torch.zeros(batch_size, self.num_iterations + 1, self.output_dim, device=device)
+            # Pre-allocate tensors with empty (no initialization overhead)
+            x_traj = torch.empty(batch_size, self.num_iterations + 1, self.output_dim, device=device)
+            v_traj = torch.empty(batch_size, self.num_iterations + 1, self.output_dim, device=device)
             x_traj[:, 0] = x
             v_traj[:, 0] = v
             # For aux, we still need a list (dict values vary)
