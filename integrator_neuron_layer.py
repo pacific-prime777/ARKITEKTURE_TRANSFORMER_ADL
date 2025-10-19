@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Any
 
 # Optional: safetensors support for fast/secure model saving
 try:
@@ -222,7 +222,7 @@ class IntegratorNeuronLayer(nn.Module):
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
         # Add deterministic harmonic excitation
-        if self.excitation_amplitude.item() > 0:
+        if self.excitation_amplitude > 0:
             # Deterministic noise based on iteration step
             t = float(step)
             # harmonic_noise shape: [output_dim]
@@ -265,6 +265,18 @@ class IntegratorNeuronLayer(nn.Module):
         v0 = torch.zeros((batch_size, self.output_dim), device=device)
         return x0, v0
 
+    def __repr__(self) -> str:
+        """String representation for debugging."""
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  hidden_dim={self.hidden_dim}, output_dim={self.output_dim},\n"
+            f"  dt={self.dt}, velocity_scale={self.velocity_scale},\n"
+            f"  excitation_amplitude={self.excitation_amplitude.item():.4f},\n"
+            f"  learnable_mu={self.learnable_mu}, dynamic_alpha={self.dynamic_alpha},\n"
+            f"  alpha_kappa={self.alpha_kappa}\n"
+            f")"
+        )
+
 
 class IntegratorModel(nn.Module):
     """
@@ -279,7 +291,7 @@ class IntegratorModel(nn.Module):
         num_iterations: int = 10,
         output_dim: int = 1,
         target_value: float = 5.0,
-        **inl_kwargs
+        **inl_kwargs: Any
     ):
         """
         Args:
@@ -292,6 +304,18 @@ class IntegratorModel(nn.Module):
             **inl_kwargs: Additional arguments for IntegratorNeuronLayer
         """
         super().__init__()
+
+        # Validate hyperparameters
+        if input_dim <= 0:
+            raise ValueError(f"input_dim must be positive, got {input_dim}")
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if num_layers <= 0:
+            raise ValueError(f"num_layers must be positive, got {num_layers}")
+        if num_iterations <= 0:
+            raise ValueError(f"num_iterations must be positive, got {num_iterations}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -458,3 +482,13 @@ class IntegratorModel(nn.Module):
 
         state_dict = load_file(path)
         self.load_state_dict(state_dict, strict=strict)
+
+    def __repr__(self) -> str:
+        """String representation for debugging."""
+        return (
+            f"{self.__class__.__name__}(\n"
+            f"  input_dim={self.input_dim}, hidden_dim={self.hidden_dim},\n"
+            f"  output_dim={self.output_dim}, num_iterations={self.num_iterations},\n"
+            f"  target_value={self.target_value}\n"
+            f")"
+        )
