@@ -60,27 +60,31 @@ cd vAgent/architecture
 pip install torch transformers tqdm
 ```
 
-### Basic Usage (RECOMMENDED)
+### Basic Usage
 
 ```python
 import sys
 sys.path.insert(0, '/path/to/vAgent/architecture')
 
-from inl_llm import create_model  # Uses ultra-optimized by default
+from inl_llm import create_model
 import torch
 
-# Create model with ALL optimizations (Level 1 + 2)
+# Create model with ALL optimizations (Level 1 + 2) enabled by default
 model = create_model(
-    size='5B',  # Real params: 'small' (30M), 'medium' (80M), '2B', '5B', '10B'
+    size='5B',  # Available: 'small' (30M), 'medium' (80M), '2B', '5B', '10B'
     vocab_size=50000
 )
 
-# This model has ALL optimizations:
-# ✅ -87% embedding params (low-rank)
-# ✅ -96% controller params (shared)
-# ✅ -98% equilibrium params (hierarchical)
-# ✅ +50% faster inference (adaptive + sparse)
-# ✅ -65% training memory (checkpointing)
+# This model includes ALL optimizations automatically:
+# ✅ Level 1: Low-rank embeddings, gradient checkpointing, adaptive early stopping
+# ✅ Level 2: Shared controllers, hierarchical equilibrium, sparse excitation
+#
+# Total gains:
+# • -87% embedding params
+# • -96% controller params
+# • -98% equilibrium params
+# • +50% faster inference
+# • -65% training memory
 
 # Forward pass
 input_ids = torch.randint(0, 50000, (2, 128))
@@ -95,17 +99,7 @@ output = model.generate(
 )
 ```
 
-### Alternative: Level 1 Only (if you want less aggressive optimization)
-
-```python
-from inl_llm import create_optimized_model
-
-# Only Level 1 optimizations (more conservative)
-model = create_optimized_model(
-    size='5B',
-    vocab_size=50000
-)
-```
+**That's it!** One function, all optimizations included by default.
 
 ---
 
@@ -114,20 +108,19 @@ model = create_optimized_model(
 ```
 architecture/
 ├── inl_llm/                    # Main package
-│   ├── __init__.py            # Package exports
+│   ├── __init__.py            # Simple API: create_model()
 │   ├── core/                  # Core architecture
 │   │   ├── integrator_neuron_layer.py
 │   │   ├── integrator_losses.py
 │   │   └── integrator_scheduler_v2.py
-│   ├── optimizations/         # Efficiency optimizations
+│   ├── optimizations/         # All optimizations (Level 1 + 2)
 │   │   ├── optimizations.py          (Level 1)
 │   │   └── advanced_optimizations.py (Level 2)
-│   └── models/                # Complete models
-│       ├── integrator_language_model_optimized.py  (Production)
-│       └── integrator_language_model_ultra.py      (Maximum efficiency)
+│   └── models/                # Production model
+│       └── integrator_language_model.py  (ALL optimizations)
 ├── docs/                      # Documentation
 │   ├── README.md             # Full architecture guide
-│   ├── OPTIMIZATIONS.md      # Optimization guide
+│   ├── OPTIMIZATIONS.md      # Optimization details
 │   └── SUMMARY.md            # Quick reference
 ├── examples/                  # Usage examples
 └── checkpoints/              # Model checkpoints
@@ -194,12 +187,14 @@ weight_i = 1 / (1 + Var(h_i))
 ## 🧪 Example: Training Loop
 
 ```python
-from inl_llm import create_optimized_model
+from inl_llm import create_model
 from inl_llm.core import IntegratorLoss, create_cycle_scheduler
 import torch.optim as optim
 
-# Create model and training components
-model = create_optimized_model(size='medium', vocab_size=50000)
+# Create model (all optimizations enabled by default)
+model = create_model(size='medium', vocab_size=50000)
+
+# Training components
 loss_fn = IntegratorLoss(variance_weighted=True)
 optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 scheduler = create_cycle_scheduler(preset='balanced')
