@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from inl_llm import create_optimized_model
+from inl_llm import create_model
 from inl_llm.core import IntegratorLoss, create_cycle_scheduler
 
 
@@ -91,11 +91,10 @@ def main():
     print(f"  Device: {device}")
 
     # Create model
-    print("\nCreating optimized model...")
-    model = create_optimized_model(
+    print("\nCreating model (all optimizations enabled)...")
+    model = create_model(
         size='small',
-        vocab_size=vocab_size,
-        enable_all_optimizations=True
+        vocab_size=vocab_size
     )
     model = model.to(device)
 

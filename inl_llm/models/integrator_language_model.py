@@ -361,6 +361,16 @@ class UltraOptimizedIntegratorLanguageModel(nn.Module):
         """Count parameters."""
         return sum(p.numel() for p in self.parameters())
 
+    def get_inference_stats(self) -> Dict:
+        """
+        Get inference statistics (adaptive early stopping).
+
+        Returns dict with average iterations per layer (if available).
+        """
+        # Ultra model doesn't track this currently
+        # TODO: Add adaptive stopping stats tracking
+        return {}
+
 
 def create_ultra_optimized_model(
     size: str = 'small',
@@ -412,12 +422,19 @@ def create_ultra_optimized_model(
 
 
 if __name__ == '__main__':
+    # Fix imports for standalone execution
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+    from inl_llm import create_model
+
     print("\n" + "=" * 70)
-    print("ULTRA-OPTIMIZED INL-LLM - Test")
+    print("INL-LLM MODEL - Test")
     print("=" * 70 + "\n")
 
-    # Create ultra-optimized model
-    model = create_ultra_optimized_model(size='medium', vocab_size=50000)
+    # Create model
+    model = create_model(size='medium', vocab_size=50000)
 
     # Test forward
     batch_size = 2
@@ -440,5 +457,5 @@ if __name__ == '__main__':
     print(f"✅ Generated length: {generated.shape[1]}")
 
     print("\n" + "=" * 70)
-    print("✅ ULTRA-OPTIMIZED INL-LLM WORKING PERFECTLY!")
+    print("✅ INL-LLM WORKING PERFECTLY!")
     print("=" * 70 + "\n")
