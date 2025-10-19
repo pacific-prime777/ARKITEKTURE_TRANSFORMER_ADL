@@ -105,15 +105,15 @@ class IntegratorNeuronLayer(nn.Module):
             self.register_buffer('mu', torch.full((output_dim,), target_value))
             self.learnable_mu = False
 
-        # For backward compatibility
-        self.target_value = target_value
-
         # Deterministic harmonic excitation
         # Store as buffer so it can be modified dynamically (e.g., by scheduler)
         self.register_buffer('excitation_amplitude', torch.tensor(excitation_amplitude, dtype=torch.float32))
-        # Learnable frequency and phase per dimension
-        self.excitation_gamma = nn.Parameter(torch.randn(output_dim) * 0.1 + 1.0)
-        self.excitation_phi = nn.Parameter(torch.randn(output_dim) * 2 * math.pi)
+        # Learnable frequency and phase per dimension (deterministic initialization)
+        # Use deterministic initialization for reproducibility
+        gen = torch.Generator()
+        gen.manual_seed(42)  # Fixed seed for reproducibility
+        self.excitation_gamma = nn.Parameter(torch.randn(output_dim, generator=gen) * 0.1 + 1.0)
+        self.excitation_phi = nn.Parameter(torch.randn(output_dim, generator=gen) * 2 * math.pi)
 
         # Input dimension for controller: [h, x, v]
         controller_input_dim = hidden_dim + 2 * output_dim
@@ -267,11 +267,13 @@ class IntegratorNeuronLayer(nn.Module):
 
     def __repr__(self) -> str:
         """String representation for debugging."""
+        # Use .item() for scalar tensors in repr (acceptable in non-critical path)
+        exc_amp = self.excitation_amplitude.item() if self.excitation_amplitude.numel() == 1 else self.excitation_amplitude
         return (
             f"{self.__class__.__name__}(\n"
             f"  hidden_dim={self.hidden_dim}, output_dim={self.output_dim},\n"
             f"  dt={self.dt}, velocity_scale={self.velocity_scale},\n"
-            f"  excitation_amplitude={self.excitation_amplitude.item():.4f},\n"
+            f"  excitation_amplitude={exc_amp:.4f},\n"
             f"  learnable_mu={self.learnable_mu}, dynamic_alpha={self.dynamic_alpha},\n"
             f"  alpha_kappa={self.alpha_kappa}\n"
             f")"
@@ -321,7 +323,6 @@ class IntegratorModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.num_iterations = num_iterations
         self.output_dim = output_dim
-        self.target_value = target_value
 
         # Backbone: simple MLP (can be replaced with Transformer)
         layers = []
@@ -488,7 +489,6 @@ class IntegratorModel(nn.Module):
         return (
             f"{self.__class__.__name__}(\n"
             f"  input_dim={self.input_dim}, hidden_dim={self.hidden_dim},\n"
-            f"  output_dim={self.output_dim}, num_iterations={self.num_iterations},\n"
-            f"  target_value={self.target_value}\n"
+            f"  output_dim={self.output_dim}, num_iterations={self.num_iterations}\n"
             f")"
         )
