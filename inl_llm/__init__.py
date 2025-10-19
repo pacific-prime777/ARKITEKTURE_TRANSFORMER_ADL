@@ -20,9 +20,13 @@ from .models.integrator_language_model_ultra import (
     UltraOptimizedIntegratorLanguageModel
 )
 
+# Alias: ultra model devient le défaut recommandé
+create_model = create_ultra_optimized_model  # RECOMMENDED: Maximum efficiency
+
 __all__ = [
-    'create_optimized_model',
-    'create_ultra_optimized_model',
+    'create_model',  # Recommended default (ultra-optimized)
+    'create_optimized_model',  # Level 1 only
+    'create_ultra_optimized_model',  # Level 1 + 2 (same as create_model)
     'OptimizedIntegratorLanguageModel',
     'UltraOptimizedIntegratorLanguageModel'
 ]

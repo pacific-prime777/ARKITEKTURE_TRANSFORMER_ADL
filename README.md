@@ -60,20 +60,27 @@ cd vAgent/architecture
 pip install torch transformers tqdm
 ```
 
-### Basic Usage
+### Basic Usage (RECOMMENDED)
 
 ```python
 import sys
 sys.path.insert(0, '/path/to/vAgent/architecture')
 
-from inl_llm import create_optimized_model
+from inl_llm import create_model  # Uses ultra-optimized by default
 import torch
 
-# Create optimized model (recommended)
-model = create_optimized_model(
-    size='medium',  # 'small', 'medium', 'large', '3B', '7B', '13B'
+# Create model with ALL optimizations (Level 1 + 2)
+model = create_model(
+    size='5B',  # Real params: 'small' (30M), 'medium' (80M), '2B', '5B', '10B'
     vocab_size=50000
 )
+
+# This model has ALL optimizations:
+# ✅ -87% embedding params (low-rank)
+# ✅ -96% controller params (shared)
+# ✅ -98% equilibrium params (hierarchical)
+# ✅ +50% faster inference (adaptive + sparse)
+# ✅ -65% training memory (checkpointing)
 
 # Forward pass
 input_ids = torch.randint(0, 50000, (2, 128))
@@ -88,23 +95,16 @@ output = model.generate(
 )
 ```
 
-### Ultra-Optimized Model (Maximum Efficiency)
+### Alternative: Level 1 Only (if you want less aggressive optimization)
 
 ```python
-from inl_llm import create_ultra_optimized_model
+from inl_llm import create_optimized_model
 
-# All optimizations enabled
-model = create_ultra_optimized_model(
-    size='7B',
+# Only Level 1 optimizations (more conservative)
+model = create_optimized_model(
+    size='5B',
     vocab_size=50000
 )
-
-# This model has:
-# ✅ -87% embedding params (low-rank)
-# ✅ -96% controller params (shared)
-# ✅ -98% equilibrium params (hierarchical)
-# ✅ +50% faster inference (adaptive + sparse)
-# ✅ -65% training memory (checkpointing)
 ```
 
 ---
