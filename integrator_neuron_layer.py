@@ -118,53 +118,33 @@ class IntegratorNeuronLayer(nn.Module):
         # Input dimension for controller: [h, x, v]
         controller_input_dim = hidden_dim + 2 * output_dim
 
-        # MLP for alpha (inertia coefficient) - output in (0, 1)
-        self.mlp_alpha = nn.Sequential(
+        # Fused controller MLP - outputs all 4 parameters at once for GPU efficiency
+        # Output: [alpha, beta, gate, v_cand] concatenated
+        self.controller_mlp = nn.Sequential(
             nn.Linear(controller_input_dim, hidden_controller),
             nn.ReLU(),
-            nn.Linear(hidden_controller, output_dim),
+            nn.Linear(hidden_controller, 4 * output_dim),  # 4x output for all params
         )
-        # Initialize to produce init_alpha
-        with torch.no_grad():
-            self.mlp_alpha[-1].bias.fill_(self._inverse_sigmoid(init_alpha))
-            # Small random initialization for symmetry breaking
-            self.mlp_alpha[-1].weight.normal_(0.0, 0.01)
 
-        # MLP for beta (correction coefficient) - output >= 0
-        self.mlp_beta = nn.Sequential(
-            nn.Linear(controller_input_dim, hidden_controller),
-            nn.ReLU(),
-            nn.Linear(hidden_controller, output_dim),
-        )
-        # Initialize to produce init_beta
-        with torch.no_grad():
-            self.mlp_beta[-1].bias.fill_(self._inverse_softplus(init_beta))
-            # Small random initialization for symmetry breaking
-            self.mlp_beta[-1].weight.normal_(0.0, 0.01)
+        # Store output_dim for splitting
+        self._controller_output_dim = output_dim
 
-        # MLP for gating g - output in (0, 1)
-        self.mlp_gate = nn.Sequential(
-            nn.Linear(controller_input_dim, hidden_controller),
-            nn.ReLU(),
-            nn.Linear(hidden_controller, output_dim),
-        )
-        # Initialize to produce init_gate
+        # Initialize to produce desired initial values
         with torch.no_grad():
-            self.mlp_gate[-1].bias.fill_(self._inverse_sigmoid(init_gate))
-            # Small random initialization for symmetry breaking
-            self.mlp_gate[-1].weight.normal_(0.0, 0.01)
+            # Split the bias into 4 parts
+            bias = self.controller_mlp[-1].bias
+            alpha_bias = bias[0*output_dim:1*output_dim]
+            beta_bias = bias[1*output_dim:2*output_dim]
+            gate_bias = bias[2*output_dim:3*output_dim]
+            v_cand_bias = bias[3*output_dim:4*output_dim]
 
-        # MLP for candidate velocity v_cand
-        self.mlp_v_cand = nn.Sequential(
-            nn.Linear(controller_input_dim, hidden_controller),
-            nn.ReLU(),
-            nn.Linear(hidden_controller, output_dim),
-        )
-        # Initialize to produce small velocities
-        with torch.no_grad():
-            self.mlp_v_cand[-1].bias.fill_(0.0)
+            alpha_bias.fill_(self._inverse_sigmoid(init_alpha))
+            beta_bias.fill_(self._inverse_softplus(init_beta))
+            gate_bias.fill_(self._inverse_sigmoid(init_gate))
+            v_cand_bias.fill_(0.0)
+
             # Small random initialization for symmetry breaking
-            self.mlp_v_cand[-1].weight.normal_(0.0, 0.01)
+            self.controller_mlp[-1].weight.normal_(0.0, 0.01)
 
     @staticmethod
     def _inverse_sigmoid(y: float) -> float:
@@ -202,35 +182,44 @@ class IntegratorNeuronLayer(nn.Module):
         # Concatenate inputs for controller
         controller_input = torch.cat([h, x, v], dim=-1)
 
-        # Compute controller parameters
-        alpha_base = torch.sigmoid(self.mlp_alpha(controller_input))
-        beta = F.softplus(self.mlp_beta(controller_input))
-        gate = torch.sigmoid(self.mlp_gate(controller_input))
-        v_cand = self.mlp_v_cand(controller_input)
+        # Compute all controller parameters in one forward pass (GPU efficient)
+        controller_output = self.controller_mlp(controller_input)
 
-        # Dynamic integration gain (α-control)
-        if self.dynamic_alpha:
-            # Compute imbalance as deviation from equilibrium attractor
-            imbalance = torch.norm(x - self.mu, dim=-1, keepdim=True)
-            # Reduce alpha (increase correction) when far from equilibrium
-            alpha = alpha_base * torch.exp(-self.alpha_kappa * imbalance)
-        else:
-            alpha = alpha_base
+        # Split into individual parameters
+        output_dim = self._controller_output_dim
+        alpha_base_raw = controller_output[:, 0*output_dim:1*output_dim]
+        beta_raw = controller_output[:, 1*output_dim:2*output_dim]
+        gate_raw = controller_output[:, 2*output_dim:3*output_dim]
+        v_cand = controller_output[:, 3*output_dim:4*output_dim]
+
+        # Apply activations
+        alpha_base = torch.sigmoid(alpha_base_raw)
+        beta = F.softplus(beta_raw)
+        gate = torch.sigmoid(gate_raw)
+
+        # Dynamic integration gain (α-control) - avoid branching with torch.where
+        imbalance = torch.norm(x - self.mu, dim=-1, keepdim=True)
+        alpha_dynamic = alpha_base * torch.exp(-self.alpha_kappa * imbalance)
+        # Use torch.where to avoid if-branch (better for compilation)
+        alpha = torch.where(
+            torch.tensor(self.dynamic_alpha, device=x.device),
+            alpha_dynamic,
+            alpha_base
+        )
 
         # Update velocity with error correction term
         error = x - self.mu
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
-        # Add deterministic harmonic excitation
-        if self.excitation_amplitude > 0:
-            # Deterministic noise based on iteration step
-            t = float(step)
-            # harmonic_noise shape: [output_dim]
-            harmonic_noise = self.excitation_amplitude * torch.sin(
-                self.excitation_gamma * t + self.excitation_phi
-            )
-            # Broadcast to [batch_size, output_dim]
-            v_next = v_next + harmonic_noise.unsqueeze(0).expand(v_next.shape[0], -1)
+        # Add deterministic harmonic excitation (always compute, mask with amplitude)
+        # Deterministic noise based on iteration step
+        t = float(step)
+        # harmonic_noise shape: [output_dim]
+        harmonic_noise = self.excitation_amplitude * torch.sin(
+            self.excitation_gamma * t + self.excitation_phi
+        )
+        # Broadcast to [batch_size, output_dim] - implicit broadcasting is efficient
+        v_next = v_next + harmonic_noise
 
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
@@ -384,10 +373,14 @@ class IntegratorModel(nn.Module):
         # Initialize state and velocity
         x, v = self.inl.init_state(batch_size, device)
 
-        # Store trajectory if requested
+        # Store trajectory if requested (pre-allocate for efficiency)
         if return_trajectory:
-            x_traj = [x.clone()]
-            v_traj = [v.clone()]
+            # Pre-allocate tensors instead of using lists
+            x_traj = torch.zeros(batch_size, self.num_iterations + 1, self.output_dim, device=device)
+            v_traj = torch.zeros(batch_size, self.num_iterations + 1, self.output_dim, device=device)
+            x_traj[:, 0] = x
+            v_traj[:, 0] = v
+            # For aux, we still need a list (dict values vary)
             aux_traj = []
 
         # Run integration steps
@@ -395,15 +388,20 @@ class IntegratorModel(nn.Module):
             x, v, aux = self.inl(h, x, v, step=t)
 
             if return_trajectory:
-                # Detach to avoid keeping full computation graph in memory
-                x_traj.append(x.detach())
-                v_traj.append(v.detach())
-                aux_traj.append({k: v.detach() for k, v in aux.items()})
+                # Store directly in pre-allocated tensors (no detach needed, done at the end)
+                x_traj[:, t + 1] = x
+                v_traj[:, t + 1] = v
+                # Only store essential aux info (skip redundant fields)
+                aux_traj.append({
+                    'alpha': aux['alpha'].detach(),
+                    'beta': aux['beta'].detach(),
+                    'error': aux['error'].detach()
+                })
 
         if return_trajectory:
             trajectory = {
-                'x': torch.stack(x_traj, dim=1),  # [B, T+1, output_dim]
-                'v': torch.stack(v_traj, dim=1),  # [B, T+1, output_dim]
+                'x': x_traj.detach(),  # Already stacked, just detach
+                'v': v_traj.detach(),  # Already stacked, just detach
                 'aux': aux_traj
             }
             return x, v, trajectory
