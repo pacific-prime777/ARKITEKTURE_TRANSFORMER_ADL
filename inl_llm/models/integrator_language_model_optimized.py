@@ -17,8 +17,8 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, List
 import math
 
-from integrator_neuron_layer import IntegratorNeuronLayer
-from optimizations import (
+from ..core.integrator_neuron_layer import IntegratorNeuronLayer
+from ..optimizations.optimizations import (
     LowRankEmbedding,
     AdaptiveIntegratorNeuronLayer,
     GradientCheckpointedINL
@@ -452,7 +452,8 @@ def create_optimized_model(
     Create optimized model with predefined size configurations.
 
     Args:
-        size: 'small', 'medium', 'large', 'xlarge', '3B', '7B', '13B'
+        size: 'small' (30M), 'medium' (80M), 'large' (220M),
+              '2B' (2.2B real params), '5B' (5.2B), '10B' (9.8B)
         vocab_size: Vocabulary size
         enable_all_optimizations: Enable all optimizations (recommended)
 
@@ -464,9 +465,9 @@ def create_optimized_model(
         'medium': {'d_model': 768, 'num_layers': 12, 'num_heads': 8, 'iterations': 7, 'ff_dim': 3072},
         'large': {'d_model': 1024, 'num_layers': 24, 'num_heads': 16, 'iterations': 10, 'ff_dim': 4096},
         'xlarge': {'d_model': 1536, 'num_layers': 32, 'num_heads': 24, 'iterations': 12, 'ff_dim': 6144},
-        '3B': {'d_model': 2048, 'num_layers': 40, 'num_heads': 32, 'iterations': 15, 'ff_dim': 8192},
-        '7B': {'d_model': 4096, 'num_layers': 32, 'num_heads': 32, 'iterations': 10, 'ff_dim': 16384},
-        '13B': {'d_model': 5120, 'num_layers': 40, 'num_heads': 40, 'iterations': 12, 'ff_dim': 20480},
+        '2B': {'d_model': 2048, 'num_layers': 40, 'num_heads': 32, 'iterations': 15, 'ff_dim': 8192},
+        '5B': {'d_model': 4096, 'num_layers': 32, 'num_heads': 32, 'iterations': 10, 'ff_dim': 16384},
+        '10B': {'d_model': 5120, 'num_layers': 40, 'num_heads': 40, 'iterations': 12, 'ff_dim': 20480},
     }
 
     if size not in configs:

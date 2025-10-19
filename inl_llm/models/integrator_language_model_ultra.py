@@ -24,12 +24,12 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, List
 import math
 
-from optimizations import (
+from ..optimizations.optimizations import (
     LowRankEmbedding,
     GradientCheckpointedINL,
     AdaptiveIntegratorNeuronLayer
 )
-from advanced_optimizations import (
+from ..optimizations.advanced_optimizations import (
     SharedController,
     SparseHarmonicINL,
     HierarchicalEquilibriumINL
