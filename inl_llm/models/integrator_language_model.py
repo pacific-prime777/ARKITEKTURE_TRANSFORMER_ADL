@@ -146,6 +146,10 @@ class UltraOptimizedINLBlock(nn.Module):
         x_state = x_norm.clone()
         v_state = torch.zeros_like(x_norm)
 
+        # Initialize trajectory storage for IntegratorLoss compatibility
+        x_trajectory = [x_state.clone()]  # Start with initial state
+        v_trajectory = [v_state.clone()]
+
         # Run INL iterations (using shared controller)
         for iteration in range(self.num_iterations):
             x_flat = x_state.reshape(batch_size * seq_len, d_model)
@@ -160,8 +164,28 @@ class UltraOptimizedINLBlock(nn.Module):
             x_state = x_next_flat.reshape(batch_size, seq_len, d_model)
             v_state = v_next_flat.reshape(batch_size, seq_len, d_model)
 
+            # Save trajectories for loss computation
+            x_trajectory.append(x_state.clone())
+            v_trajectory.append(v_state.clone())
+
         output = x_state
-        aux_infos = aux
+
+        # Stack trajectories: [batch, seq_len, T+1, d_model]
+        x_traj_stacked = torch.stack(x_trajectory, dim=2)  # [B, S, T+1, D]
+        v_traj_stacked = torch.stack(v_trajectory, dim=2)  # [B, S, T+1, D]
+
+        # Flatten batch and seq_len for loss computation: [B*S, T+1, D]
+        x_traj_flat = x_traj_stacked.reshape(batch_size * seq_len, self.num_iterations + 1, d_model)
+        v_traj_flat = v_traj_stacked.reshape(batch_size * seq_len, self.num_iterations + 1, d_model)
+
+        # Build aux_infos with trajectory data (compatible with IntegratorLoss)
+        aux_infos = {
+            'x': x_traj_flat,  # [B*S, T+1, D] - full trajectory
+            'v': v_traj_flat,  # [B*S, T+1, D] - full trajectory
+            'mu': aux.get('mu', None),
+            'mu_global': aux.get('mu_global', None),
+            'mu_offsets': aux.get('mu_offsets', None)
+        }
 
         # Residual
         x = x + self.dropout(output)

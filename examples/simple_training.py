@@ -63,30 +63,34 @@ def train_epoch(model, dataloader, loss_fn, optimizer, scheduler, device='cpu', 
         logits_flat = logits.view(-1, logits.size(-1))
         targets_flat = targets.view(-1)
 
-        # ✅ FIX #1: Use IntegratorLoss with trajectory (was only using CrossEntropyLoss)
+        # ✅ Use full IntegratorLoss with trajectory-based regularization
+        # Model now returns x/v trajectories compatible with IntegratorLoss
         if loss_fn is not None and trajectory is not None:
-            # Use full IntegratorLoss with all components
+            # Get last layer's trajectory (list of dicts, one per layer)
+            last_layer_traj = trajectory[-1] if isinstance(trajectory, list) and len(trajectory) > 0 else trajectory
+
+            # Use full IntegratorLoss with all components (L_task + L_mean + L_speed + L_energy)
             loss_components = loss_fn(
                 predictions=logits_flat,
                 targets=targets_flat,
-                trajectory=trajectory,
+                trajectory=last_layer_traj,
                 epoch=epoch
             )
             loss = loss_components['total']
 
-            # Log detailed loss components occasionally
+            # Log detailed loss components
             if batch_idx % 10 == 0:
-                L_task = loss_components.get('L_task', 0)
-                L_mean = loss_components.get('L_mean', 0)
-                L_speed = loss_components.get('L_speed', 0)
-                L_energy = loss_components.get('L_energy', 0)
+                L_task = loss_components.get('L_task', torch.tensor(0.0)).item()
+                L_mean = loss_components.get('L_mean', torch.tensor(0.0)).item()
+                L_speed = loss_components.get('L_speed', torch.tensor(0.0)).item()
+                L_energy = loss_components.get('L_energy', torch.tensor(0.0)).item()
                 print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f} '
                       f'[Task: {L_task:.4f}, Mean: {L_mean:.4f}, Speed: {L_speed:.4f}, Energy: {L_energy:.4f}]')
         else:
             # Fallback to simple CrossEntropy
             loss = nn.CrossEntropyLoss()(logits_flat, targets_flat)
             if batch_idx % 10 == 0:
-                print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f}')
+                print(f'  Batch {batch_idx}/{len(dataloader)}, Loss: {loss.item():.4f} [Fallback CE]')
 
         # Backward
         optimizer.zero_grad()
