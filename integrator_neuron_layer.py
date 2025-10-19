@@ -84,8 +84,6 @@ class IntegratorNeuronLayer(nn.Module):
         # Learnable frequency and phase per dimension
         self.excitation_gamma = nn.Parameter(torch.randn(output_dim) * 0.1 + 1.0)
         self.excitation_phi = nn.Parameter(torch.randn(output_dim) * 2 * math.pi)
-        # Global step counter (increments in both train and eval for determinism)
-        self.register_buffer('global_step', torch.tensor(0, dtype=torch.long))
 
         # Input dimension for controller: [h, x, v]
         controller_input_dim = hidden_dim + 2 * output_dim
@@ -154,7 +152,8 @@ class IntegratorNeuronLayer(nn.Module):
         self,
         h: torch.Tensor,
         x: torch.Tensor,
-        v: torch.Tensor
+        v: torch.Tensor,
+        step: int = 0
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass computing one integration step.
@@ -163,6 +162,7 @@ class IntegratorNeuronLayer(nn.Module):
             h: Context embedding [batch_size, hidden_dim]
             x: Current state [batch_size, output_dim]
             v: Current velocity [batch_size, output_dim]
+            step: Current iteration step for deterministic excitation
 
         Returns:
             x_next: Next state [batch_size, output_dim]
@@ -193,15 +193,12 @@ class IntegratorNeuronLayer(nn.Module):
 
         # Add deterministic harmonic excitation
         if self.excitation_amplitude > 0:
-            # Deterministic noise based on global step counter
-            t = self.global_step.float()
+            # Deterministic noise based on iteration step
+            t = float(step)
             harmonic_noise = self.excitation_amplitude * torch.sin(
                 self.excitation_gamma * t + self.excitation_phi
             )
             v_next = v_next + harmonic_noise.unsqueeze(0)
-
-            # Increment global step counter (in both train and eval for determinism)
-            self.global_step += 1
 
         # Update state with gated velocity
         x_next = x + self.dt * gate * self.velocity_scale * v_next
@@ -295,8 +292,13 @@ class IntegratorModel(nn.Module):
         # Initialize readout to identity transformation (no bias shift)
         # Since x is already initialized to target_value, we just pass it through
         with torch.no_grad():
-            self.readout.weight.fill_(0.0)
-            self.readout.weight.diagonal().fill_(1.0)
+            # Only set diagonal if square matrix
+            if self.readout.weight.shape[0] == self.readout.weight.shape[1]:
+                self.readout.weight.fill_(0.0)
+                self.readout.weight.diagonal().fill_(1.0)
+            else:
+                # For non-square, use Xavier/Glorot initialization
+                nn.init.xavier_uniform_(self.readout.weight)
             self.readout.bias.fill_(0.0)  # No bias - x already at target_value
 
     def forward(
@@ -332,12 +334,12 @@ class IntegratorModel(nn.Module):
 
         # Run integration steps
         for t in range(self.num_iterations):
-            x, v, aux = self.inl(h, x, v)
+            x, v, aux = self.inl(h, x, v, step=t)
 
             if return_trajectory:
-                x_traj.append(x.clone())
-                v_traj.append(v.clone())
-                aux_traj.append({k: v.clone() for k, v in aux.items()})
+                x_traj.append(x)
+                v_traj.append(v)
+                aux_traj.append(aux)
 
         # Final readout
         output = self.readout(x)
@@ -360,8 +362,8 @@ class IntegratorModel(nn.Module):
         h = self.backbone(inputs)
         x, v = self.inl.init_state(batch_size, device)
 
-        for _ in range(self.num_iterations):
-            x, v, _ = self.inl(h, x, v)
+        for t in range(self.num_iterations):
+            x, v, _ = self.inl(h, x, v, step=t)
 
         return x
 
