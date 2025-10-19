@@ -2,9 +2,14 @@
 Simple training example for INL-LLM
 
 This script demonstrates basic training with:
-- Optimized model (Level 1)
-- Synthetic data
+- Optimized model (Level 1 + 2)
+- Synthetic data (1000 samples, 20 epochs)
 - Equilibrium-exploration cycles
+- Adaptive early stopping (3× faster inference)
+
+NOTE: Generation quality will be poor until loss < 2.0
+      Currently training on synthetic patterns, not real text.
+      For production: use real text data (WikiText, OpenWebText, etc.)
 """
 
 import sys
@@ -29,22 +34,61 @@ except ImportError:
 class SimpleTextDataset(Dataset):
     """Simple synthetic dataset with learnable patterns (not pure random)."""
 
-    def __init__(self, vocab_size=5000, num_samples=1000, seq_len=128):
+    def __init__(self, vocab_size=5000, num_samples=1000, seq_len=128, tokenizer=None):
         self.vocab_size = vocab_size
         self.num_samples = num_samples
         self.seq_len = seq_len
+        self.tokenizer = tokenizer
+
+        # If tokenizer is provided, generate realistic text samples
+        if tokenizer:
+            print("  🔤 Generating text dataset with GPT-2 tokenizer...")
+            self.samples = self._generate_text_samples()
+        else:
+            self.samples = None
+
+    def _generate_text_samples(self):
+        """Generate simple text patterns that the model can learn."""
+        templates = [
+            "The quick brown fox jumps over the lazy dog. ",
+            "Once upon a time, there was a beautiful princess. ",
+            "In a galaxy far, far away, there lived many creatures. ",
+            "The rain in Spain falls mainly on the plain. ",
+            "To be or not to be, that is the question. ",
+            "All that glitters is not gold. ",
+            "A journey of a thousand miles begins with a single step. ",
+            "The early bird catches the worm. ",
+            "Actions speak louder than words. ",
+            "Where there's a will, there's a way. ",
+        ]
+
+        samples = []
+        for i in range(self.num_samples):
+            # Create varied text by repeating and combining templates
+            text = templates[i % len(templates)] * 3  # Repeat for longer sequences
+            # Tokenize
+            tokens = self.tokenizer.encode(text, max_length=self.seq_len+1, truncation=True)
+            # Pad if needed
+            if len(tokens) < self.seq_len + 1:
+                tokens = tokens + [self.tokenizer.pad_token_id] * (self.seq_len + 1 - len(tokens))
+            samples.append(torch.tensor(tokens[:self.seq_len+1]))
+
+        return samples
 
     def __len__(self):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # Generate structured sequences with patterns (easier to learn than pure random)
-        # Use mix of: counting sequences, repeated patterns, and some randomness
-        base_pattern = torch.arange(0, self.seq_len) % min(100, self.vocab_size)
-        noise = torch.randint(-5, 6, (self.seq_len,))  # Small perturbations
-        seq = (base_pattern + noise + idx * 7) % self.vocab_size  # Add variety per sample
-        # Target is shifted by 1 (next token prediction)
-        return seq[:-1], seq[1:]
+        if self.samples is not None:
+            # Real tokenized text
+            seq = self.samples[idx]
+            return seq[:-1], seq[1:]
+        else:
+            # Fallback: synthetic patterns
+            base_pattern = torch.arange(0, self.seq_len) % min(100, self.vocab_size)
+            noise = torch.randint(-5, 6, (self.seq_len,))
+            seq = (base_pattern + noise + idx * 7) % self.vocab_size
+            return seq[:-1], seq[1:]
 
 
 def train_epoch(model, dataloader, loss_fn, optimizer, scheduler, device='cpu', epoch=0):
@@ -113,21 +157,29 @@ def main():
     print("SIMPLE TRAINING EXAMPLE - INL-LLM")
     print("="*70)
 
-    # Load tokenizer
+    # Load tokenizer (GPT-2 BPE tokenizer, same as used by many LLMs)
     print("\nLoading tokenizer...")
     if TOKENIZER_AVAILABLE:
-        tokenizer = AutoTokenizer.from_pretrained("gpt2")
-        tokenizer.pad_token = tokenizer.eos_token
-        vocab_size = tokenizer.vocab_size
-        print(f"✅ Tokenizer loaded: GPT-2 (vocab_size={vocab_size})")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            tokenizer.pad_token = tokenizer.eos_token
+            vocab_size = tokenizer.vocab_size
+            print(f"✅ Tokenizer loaded: GPT-2 BPE (vocab_size={vocab_size})")
+            print(f"   Example: 'Hello' -> {tokenizer.encode('Hello')}")
+        except Exception as e:
+            print(f"❌ Failed to load tokenizer: {e}")
+            tokenizer = None
+            vocab_size = 50000
+            print(f"⚠️ Falling back to synthetic data (vocab_size={vocab_size})")
     else:
         tokenizer = None
         vocab_size = 50000
-        print(f"⚠️ Using synthetic data (vocab_size={vocab_size})")
+        print(f"⚠️ transformers not installed. Using synthetic data (vocab_size={vocab_size})")
+        print(f"   Install with: pip install transformers")
 
     # Configuration
     batch_size = 2
-    num_epochs = 3
+    num_epochs = 20  # ✅ Increased from 3 to 20 for better convergence
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print(f"\nConfiguration:")
@@ -161,7 +213,12 @@ def main():
 
     # Create dataset and dataloader
     print("\nCreating dataset...")
-    dataset = SimpleTextDataset(vocab_size=vocab_size, num_samples=100, seq_len=64)
+    dataset = SimpleTextDataset(
+        vocab_size=vocab_size,
+        num_samples=1000,  # ✅ Increased from 100
+        seq_len=64,
+        tokenizer=tokenizer  # ✅ Pass tokenizer to use real text instead of synthetic tokens
+    )
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # ✅ FIX #3: Lower learning rate for large model (was 3e-4, too high)
@@ -223,11 +280,22 @@ def main():
     print("TRAINING COMPLETE!")
     print("="*70)
 
-    # Save model
-    save_path = 'checkpoints/simple_model.pt'
-    os.makedirs('checkpoints', exist_ok=True)
-    torch.save(model.state_dict(), save_path)
-    print(f"\nModel saved to: {save_path}")
+    # Save model AND tokenizer
+    save_dir = 'checkpoints/inl_1b_model'
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Save model weights
+    model_path = os.path.join(save_dir, 'pytorch_model.pt')
+    torch.save(model.state_dict(), model_path)
+    print(f"\n💾 Model saved to: {model_path}")
+
+    # Save tokenizer (if available)
+    if tokenizer:
+        tokenizer.save_pretrained(save_dir)
+        print(f"💾 Tokenizer saved to: {save_dir}")
+        print(f"   Files: vocab.json, merges.txt, tokenizer_config.json")
+
+    print(f"\n✅ Complete checkpoint saved to: {save_dir}")
 
     # Test generation
     print("\nTesting generation...")
