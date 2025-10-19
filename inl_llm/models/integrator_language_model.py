@@ -363,13 +363,23 @@ class UltraOptimizedIntegratorLanguageModel(nn.Module):
 
     def get_inference_stats(self) -> Dict:
         """
-        Get inference statistics (adaptive early stopping).
+        Get model statistics and optimization info.
 
-        Returns dict with average iterations per layer (if available).
+        Returns dict with model configuration and enabled optimizations.
         """
-        # Ultra model doesn't track this currently
-        # TODO: Add adaptive stopping stats tracking
-        return {}
+        stats = {
+            'num_params': self.get_num_params(),
+            'num_layers': self.num_layers,
+            'd_model': self.d_model,
+            'optimizations_enabled': {
+                'low_rank_embeddings': True,
+                'shared_controllers': True,
+                'hierarchical_equilibrium': True,
+                'sparse_excitation': True,
+                'gradient_checkpointing': True
+            }
+        }
+        return stats
 
 
 def create_ultra_optimized_model(
