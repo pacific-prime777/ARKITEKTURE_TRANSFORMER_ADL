@@ -15,6 +15,13 @@ import torch.nn.functional as F
 import math
 from typing import Optional, Tuple, Dict
 
+# Optional: safetensors support for fast/secure model saving
+try:
+    from safetensors.torch import save_file, load_file
+    SAFETENSORS_AVAILABLE = True
+except ImportError:
+    SAFETENSORS_AVAILABLE = False
+
 
 class IntegratorNeuronLayer(nn.Module):
     """
@@ -61,6 +68,28 @@ class IntegratorNeuronLayer(nn.Module):
         """
         super().__init__()
 
+        # Validate hyperparameters
+        if hidden_dim <= 0:
+            raise ValueError(f"hidden_dim must be positive, got {hidden_dim}")
+        if output_dim <= 0:
+            raise ValueError(f"output_dim must be positive, got {output_dim}")
+        if dt <= 0:
+            raise ValueError(f"dt must be positive, got {dt}")
+        if hidden_controller <= 0:
+            raise ValueError(f"hidden_controller must be positive, got {hidden_controller}")
+        if not 0 <= init_alpha <= 1:
+            raise ValueError(f"init_alpha must be in [0, 1], got {init_alpha}")
+        if init_beta < 0:
+            raise ValueError(f"init_beta must be non-negative, got {init_beta}")
+        if not 0 <= init_gate <= 1:
+            raise ValueError(f"init_gate must be in [0, 1], got {init_gate}")
+        if velocity_scale <= 0:
+            raise ValueError(f"velocity_scale must be positive, got {velocity_scale}")
+        if excitation_amplitude < 0:
+            raise ValueError(f"excitation_amplitude must be non-negative, got {excitation_amplitude}")
+        if alpha_kappa < 0:
+            raise ValueError(f"alpha_kappa must be non-negative, got {alpha_kappa}")
+
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.dt = dt
@@ -80,7 +109,8 @@ class IntegratorNeuronLayer(nn.Module):
         self.target_value = target_value
 
         # Deterministic harmonic excitation
-        self.excitation_amplitude = excitation_amplitude
+        # Store as buffer so it can be modified dynamically (e.g., by scheduler)
+        self.register_buffer('excitation_amplitude', torch.tensor(excitation_amplitude, dtype=torch.float32))
         # Learnable frequency and phase per dimension
         self.excitation_gamma = nn.Parameter(torch.randn(output_dim) * 0.1 + 1.0)
         self.excitation_phi = nn.Parameter(torch.randn(output_dim) * 2 * math.pi)
@@ -192,7 +222,7 @@ class IntegratorNeuronLayer(nn.Module):
         v_next = alpha * v + (1 - alpha) * v_cand - beta * error
 
         # Add deterministic harmonic excitation
-        if self.excitation_amplitude > 0:
+        if self.excitation_amplitude.item() > 0:
             # Deterministic noise based on iteration step
             t = float(step)
             # harmonic_noise shape: [output_dim]
@@ -230,8 +260,8 @@ class IntegratorNeuronLayer(nn.Module):
             x0: Initial state [batch_size, output_dim] initialized to learned mu
             v0: Initial velocity [batch_size, output_dim] initialized to 0
         """
-        # Initialize to current learned equilibrium
-        x0 = self.mu.unsqueeze(0).expand(batch_size, -1)
+        # Initialize to current learned equilibrium, ensure correct device
+        x0 = self.mu.unsqueeze(0).expand(batch_size, -1).to(device)
         v0 = torch.zeros((batch_size, self.output_dim), device=device)
         return x0, v0
 
@@ -404,9 +434,7 @@ class IntegratorModel(nn.Module):
 
         Requires: pip install safetensors
         """
-        try:
-            from safetensors.torch import save_file
-        except ImportError:
+        if not SAFETENSORS_AVAILABLE:
             raise ImportError(
                 "safetensors not installed. Install with: pip install safetensors"
             )
@@ -423,9 +451,7 @@ class IntegratorModel(nn.Module):
 
         Requires: pip install safetensors
         """
-        try:
-            from safetensors.torch import load_file
-        except ImportError:
+        if not SAFETENSORS_AVAILABLE:
             raise ImportError(
                 "safetensors not installed. Install with: pip install safetensors"
             )
