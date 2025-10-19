@@ -32,7 +32,8 @@ class IntegratorLoss(nn.Module):
         variance_weighted: bool = True,
         exploration_phase: bool = False,
         exploration_lambda_mean: float = 0.05,
-        exploration_lambda_energy: float = 0.001
+        exploration_lambda_energy: float = 0.001,
+        task_loss_type: str = 'mse'  # 'mse' for regression, 'ce' for classification (LM)
     ):
         """
         Args:
@@ -48,6 +49,7 @@ class IntegratorLoss(nn.Module):
             exploration_phase: Current phase (equilibrium=False, exploration=True)
             exploration_lambda_mean: Lambda mean during exploration phase
             exploration_lambda_energy: Lambda energy during exploration phase
+            task_loss_type: 'mse' for regression, 'ce' for classification/language modeling
         """
         super().__init__()
 
@@ -66,7 +68,14 @@ class IntegratorLoss(nn.Module):
         self.exploration_lambda_mean = exploration_lambda_mean
         self.exploration_lambda_energy = exploration_lambda_energy
 
-        self.task_loss = nn.MSELoss()
+        # Task loss type: MSE for regression, CrossEntropy for classification (language models)
+        self.task_loss_type = task_loss_type
+        if task_loss_type == 'mse':
+            self.task_loss = nn.MSELoss()
+        elif task_loss_type == 'ce':
+            self.task_loss = nn.CrossEntropyLoss()
+        else:
+            raise ValueError(f"Unknown task_loss_type: {task_loss_type}. Use 'mse' or 'ce'.")
 
     def get_lambda_mean(self, epoch: int) -> float:
         """

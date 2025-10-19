@@ -182,9 +182,10 @@ def main():
         lambda_speed=0.1,
         lambda_energy=0.01,
         annealing_epochs=num_epochs,
-        variance_weighted=True
+        variance_weighted=True,
+        task_loss_type='ce'  # ✅ Use CrossEntropy for language modeling (not MSE)
     )
-    print(f"✅ Loss function: IntegratorLoss with trajectory-based regularization")
+    print(f"✅ Loss function: IntegratorLoss with CrossEntropy + trajectory regularization")
 
     # Create scheduler (optional)
     cycle_scheduler = create_cycle_scheduler(preset='balanced')
